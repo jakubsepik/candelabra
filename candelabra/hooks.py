@@ -77,6 +77,12 @@ app_include_js = ["/assets/candelabra/js/d3.min.js"]
 # Jinja
 # ----------
 
+jinja = {
+    "methods": [
+        "candelabra.api.qr.generate_custom_qr",
+        "candelabra.api.qr.generate_payment_qr",
+    ]
+}
 # add methods and filters to jinja environment
 # jinja = {
 # 	"methods": "candelabra.utils.jinja_methods",
