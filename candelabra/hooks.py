@@ -45,7 +45,12 @@ app_include_js = ["/assets/candelabra/js/d3.min.js"]
 
 # include js in doctype views
 # doctype_js = {"doctype" : "public/js/doctype.js"}
-# doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
+doctype_list_js = {
+    "Serial No": "public/js/list_export_qr.js",
+    "Purchase Invoice": "public/js/list_export_qr.js",
+    "Purchase Receipt": "public/js/list_export_qr.js",
+    "Item": "public/js/list_export_qr.js",
+    }
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
 
