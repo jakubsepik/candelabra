@@ -63,15 +63,8 @@ def generate_custom_qr(text: str, doctype: str | None = None):
     frappe.cache().set_value(cache_key, result, expires_in_sec=3600)
     return result
 
-# Mapovanie: doctype -> skratka typu, ktorá pôjde do QR kódu.
-# Pridávaj sem riadok pre každý doctype, ktorý budeš chcieť štítkovať.
-TYPE_MAP = {
-    "Serial No": "ITEM",
-    "Purchase Invoice": "INV",
-    "Purchase Receipt": "REC",
-    "Item": "ITEM",
-}
 
+from candelabra.constants import TYPE_MAP
 
 @frappe.whitelist()
 def export_qr_codes(doctype, names):

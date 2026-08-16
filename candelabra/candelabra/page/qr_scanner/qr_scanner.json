@@ -1,0 +1,9 @@
+{
+    "doctype": "Page",
+    "module": "Candelabra",
+    "name": "qr-scanner",
+    "page_name": "qr-scanner",
+    "title": "QR Scanner",
+    "standard": "Yes",
+    "roles": []
+}
