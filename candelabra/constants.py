@@ -1,6 +1,5 @@
 TYPE_MAP = {
-    "Purchase Invoice": "INV",
-    "Purchase Receipt": "REC",
+    "QR Code Link": "QRCODE",
     "Item": "ITEM",
 }
 

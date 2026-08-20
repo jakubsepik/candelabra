@@ -1,4 +1,6 @@
+console.log("CANDELABRA QR LIST JS LOADED");
 function add_qr_export(listview) {
+    console.log("add_qr_export:", listview.doctype);
     listview.page.add_actions_menu_item(__('Export QR kódov'), () => {
         const names = listview.get_checked_items(true);
         if (!names.length) {
@@ -50,18 +52,18 @@ function show_qr_dialog(doctype, csv_text) {
     dialog.show();
 }
 
-frappe.listview_settings['Serial No'] = {
-    onload: add_qr_export,
-};
+Object.keys(frappe.boot.candelabra_type_map || {}).forEach((doctype) => {
+    frappe.listview_settings[doctype] =
+        frappe.listview_settings[doctype] || {};
 
-frappe.listview_settings['Purchase Invoice'] = {
-    onload: add_qr_export,
-};
+    const original_onload =
+        frappe.listview_settings[doctype].onload;
 
-frappe.listview_settings['Purchase Receipt'] = {
-    onload: add_qr_export,
-};
+    frappe.listview_settings[doctype].onload = function (listview) {
+        if (original_onload) {
+            original_onload(listview);
+        }
 
-frappe.listview_settings['Item'] = {
-    onload: add_qr_export,
-};
+        add_qr_export(listview);
+    };
+});

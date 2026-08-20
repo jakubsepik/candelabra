@@ -74,5 +74,8 @@ def export_qr_codes(doctype, names):
     if not code_type:
         frappe.throw(f"QR typ nie je nastavený pre {doctype}")
 
-    lines = [f"CDLB:{code_type}:{name}" for name in names]
+    if code_type == "QRCODE":
+        lines = [f"CDLB:{name}" for name in names]
+    else:
+        lines = [f"CDLB:{code_type}:{name}" for name in names]
     return "\n".join(lines)
