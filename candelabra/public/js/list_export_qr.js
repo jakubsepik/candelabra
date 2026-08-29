@@ -1,6 +1,4 @@
-console.log("CANDELABRA QR LIST JS LOADED");
 function add_qr_export(listview) {
-    console.log("add_qr_export:", listview.doctype);
     listview.page.add_actions_menu_item(__('Export QR kódov'), () => {
         const names = listview.get_checked_items(true);
         if (!names.length) {
@@ -15,13 +13,13 @@ function add_qr_export(listview) {
                 names: JSON.stringify(names),
             },
             callback(r) {
-                show_qr_dialog(listview.doctype, r.message);
+                show_qr_dialog(listview.doctype, r.message, names);
             },
         });
     });
 }
 
-function show_qr_dialog(doctype, csv_text) {
+function show_qr_dialog(doctype, csv_text, names) {
     const dialog = new frappe.ui.Dialog({
         title: __('QR kódy'),
         fields: [
@@ -38,14 +36,17 @@ function show_qr_dialog(doctype, csv_text) {
         primary_action() {
             const blob = new Blob([csv_text], { type: 'text/csv' });
             const url = window.URL.createObjectURL(blob);
-
             const a = document.createElement('a');
             a.href = url;
             a.download = `${doctype}_qr_codes.csv`;
             a.click();
-
             window.URL.revokeObjectURL(url);
             dialog.hide();
+        },
+        secondary_action_label: __('Stiahnuť QR PDF'),
+        secondary_action() {
+            const url = `/api/method/candelabra.api.qr.export_qr_pdf?doctype=${encodeURIComponent(doctype)}&names=${encodeURIComponent(JSON.stringify(names))}`;
+            window.open(url);
         },
     });
 

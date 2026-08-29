@@ -4,6 +4,7 @@ from candelabra.qr_service.generator import (
     generate_pay_by_square_qr, generate_generic_qr, image_to_base64,
 )
 from candelabra.qr_service.bysquare import build_pay_by_square
+from frappe.utils.pdf import get_chrome_pdf
 
 PBS_FRAME_PATH = f"{BRAND_DIR}/pay_by_square_frame.png"
 
@@ -50,15 +51,98 @@ def generate_custom_qr(text: str, doctype: str | None = None):
 
 
 @frappe.whitelist()
-def export_qr_codes(doctype, names):
+def export_qr_pdf(doctype, names):
     names = frappe.parse_json(names)
-
     code_type = TYPE_MAP.get(doctype)
     if not code_type:
         frappe.throw(f"QR typ nie je nastavený pre {doctype}")
 
-    if code_type == "QRCODE":
-        lines = [f"CDLB:{name}" for name in names]
-    else:
-        lines = [f"CDLB:{code_type}:{name}" for name in names]
-    return "\n".join(lines)
+    pages = []
+    for name in names:
+        if code_type == "QRCODE":
+            code = f"CDLB:{name}"
+        else:
+            code = f"CDLB:{code_type}:{name}"
+        img_b64 = generate_custom_qr(code)
+        label = f"{doctype}:{name}"
+        pages.append(f"""
+            <div class="qr-page">
+                <div class="qr-frame">
+                    <div class="qr-img-wrap">
+                        <img src="data:image/png;base64,{img_b64}" />
+                    </div>
+                    <div class="qr-label">{label}</div>
+                </div>
+            </div>
+        """)
+
+    html = f"""
+    <html>
+    <head>
+        <style>
+            @page {{ size: 210mm 210mm; margin: 0; }}
+            html, body {{ margin: 0; padding: 0; }}
+            .qr-page {{
+                page-break-after: always;
+                width: 210mm;
+                height: 210mm;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                box-sizing: border-box;
+                padding: 10mm;
+            }}
+            .qr-frame {{
+                position: relative;
+                border: 3mm solid black;
+                width: 100%;
+                height: 100%;
+                box-sizing: border-box;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 4mm;
+            }}
+            .qr-img-wrap {{
+                width: 100%;
+                height: 100%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }}
+            .qr-img-wrap img {{
+                width: 100%;
+                height: 100%;
+                object-fit: contain;
+            }}
+            .qr-label {{
+                position: absolute;
+                bottom: -6mm;
+                left: 50%;
+                transform: translateX(-50%);
+                background: white;
+                padding: 2mm 8mm;
+                font-family: monospace;
+                font-size: 20pt;
+                white-space: nowrap;
+            }}
+        </style>
+    </head>
+    <body>{''.join(pages)}</body>
+    </html>
+    """
+
+    pdf_bytes = get_chrome_pdf(
+        print_format=None,
+        html=html,
+        options={},
+        output=None,
+        pdf_generator="chrome",
+    )
+
+    if not pdf_bytes:
+        frappe.throw("PDF generovanie zlyhalo")
+
+    frappe.local.response.filename = f"{doctype}_qr_codes.pdf"
+    frappe.local.response.filecontent = pdf_bytes
+    frappe.local.response.type = "download"
