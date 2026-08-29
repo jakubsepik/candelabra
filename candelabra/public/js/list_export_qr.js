@@ -13,13 +13,13 @@ function add_qr_export(listview) {
                 names: JSON.stringify(names),
             },
             callback(r) {
-                show_qr_dialog(listview.doctype, r.message);
+                show_qr_dialog(listview.doctype, r.message, names);
             },
         });
     });
 }
 
-function show_qr_dialog(doctype, csv_text) {
+function show_qr_dialog(doctype, csv_text, names) {
     const dialog = new frappe.ui.Dialog({
         title: __('QR kódy'),
         fields: [
@@ -36,32 +36,35 @@ function show_qr_dialog(doctype, csv_text) {
         primary_action() {
             const blob = new Blob([csv_text], { type: 'text/csv' });
             const url = window.URL.createObjectURL(blob);
-
             const a = document.createElement('a');
             a.href = url;
             a.download = `${doctype}_qr_codes.csv`;
             a.click();
-
             window.URL.revokeObjectURL(url);
             dialog.hide();
+        },
+        secondary_action_label: __('Stiahnuť QR PDF'),
+        secondary_action() {
+            const url = `/api/method/candelabra.api.qr.export_qr_pdf?doctype=${encodeURIComponent(doctype)}&names=${encodeURIComponent(JSON.stringify(names))}`;
+            window.open(url);
         },
     });
 
     dialog.show();
 }
 
-frappe.listview_settings['Serial No'] = {
-    onload: add_qr_export,
-};
+Object.keys(frappe.boot.candelabra_type_map || {}).forEach((doctype) => {
+    frappe.listview_settings[doctype] =
+        frappe.listview_settings[doctype] || {};
 
-frappe.listview_settings['Purchase Invoice'] = {
-    onload: add_qr_export,
-};
+    const original_onload =
+        frappe.listview_settings[doctype].onload;
 
-frappe.listview_settings['Purchase Receipt'] = {
-    onload: add_qr_export,
-};
+    frappe.listview_settings[doctype].onload = function (listview) {
+        if (original_onload) {
+            original_onload(listview);
+        }
 
-frappe.listview_settings['Item'] = {
-    onload: add_qr_export,
-};
+        add_qr_export(listview);
+    };
+});

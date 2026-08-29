@@ -4,6 +4,7 @@ from qrcode.image.styledpil import StyledPilImage
 from PIL import Image
 import io
 import base64
+import os
 
 
 def _build_base(data: str, error_correction=ERROR_CORRECT_M, box_size: int = 10,
@@ -11,16 +12,14 @@ def _build_base(data: str, error_correction=ERROR_CORRECT_M, box_size: int = 10,
     qr = qrcode.QRCode(error_correction=error_correction, box_size=box_size, border=4)
     qr.add_data(data)
     qr.make(fit=True)
-    return qr.make_image(fill_color=fill_color, back_color=back_color).convert("RGBA")
+    return qr.make_image(fill_color=fill_color, back_color=back_color).convert("RGBA") # type: ignore
 
 
 def generate_generic_qr(text: str, logo_path: str | None = None, box_size: int = 10) -> Image.Image:
-    """
-    Klasicky QR kod s lubovolnym textom/URL a volitelnym vlastnym logom
-    vlozenym do stredu. Logo vyzaduje ERROR_CORRECT_H.
-    """
     if not logo_path:
         return _build_base(text, error_correction=ERROR_CORRECT_M, box_size=box_size)
+
+    logo_image = _flatten_logo_to_white(logo_path)
 
     qr = qrcode.QRCode(error_correction=ERROR_CORRECT_H, box_size=box_size, border=4)
     qr.add_data(text)
@@ -28,11 +27,26 @@ def generate_generic_qr(text: str, logo_path: str | None = None, box_size: int =
 
     img = qr.make_image(
         image_factory=StyledPilImage,
-        embedded_image_path=logo_path,
+        embedded_image=logo_image,
         embedded_image_ratio=0.22,
     )
     return img.convert("RGBA")
 
+
+def _flatten_logo_to_white(logo_path: str) -> Image.Image:
+    """
+    Otvori logo a ak ma transparentnost, skomponuje ho na biele pozadie.
+    Vrati PIL Image objekt (v pamati, ziadny docasny subor).
+    """
+    img = Image.open(logo_path)
+
+    if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+        img = img.convert("RGBA")
+        background = Image.new("RGBA", img.size, (255, 255, 255, 255))
+        background.paste(img, mask=img.split()[-1])
+        return background.convert("RGB")
+
+    return img.convert("RGB")
 
 PBS_FRAME_BOX = (6, 7, 452, 454)  # left, top, right, bottom - qr placement area, 462x541 asset
 

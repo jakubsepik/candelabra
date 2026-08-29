@@ -23,24 +23,57 @@ frappe.pages['qr-scanner'].on_page_load = function (wrapper) {
         });
     }
 
-    function handle_scan(text) {
+    async function handle_scan(text) {
         let parts = text.split(":");
-        if (parts.length !== 3 || parts[0] !== "CDLB") {
+
+        if (parts[0] !== "CDLB" || parts.length < 2 || parts.length > 3) {
             frappe.msgprint(__("Neplatný QR formát"));
             return;
         }
-        let [, type_code, id] = parts;
-        let doctype = frappe.boot.candelabra_type_map_reverse[type_code];
-        if (!doctype) {
-            frappe.msgprint(__("Neznámy typ: {0}", [type_code]));
-            return;
-        }
-        frappe.db.exists(doctype, id).then(exists => {
-            if (exists) {
-                frappe.set_route("Form", doctype, id);
-            } else {
-                frappe.msgprint(__("Dokument {0} {1} neexistuje", [doctype, id]));
+
+        let doctype;
+        let id;
+
+        if (parts.length === 2) {
+            [, id] = parts;
+
+            const r = await frappe.db.get_value(
+                "QR Code Link",
+                id,
+                ["reference_doctype", "reference_name"]
+            );
+
+            if (!r?.message?.reference_doctype || !r?.message?.reference_name) {
+                frappe.msgprint(
+                    __("QR Code Link neexistuje alebo nemá nastavenú referenciu")
+                );
+                return;
             }
-        });
+
+            doctype = r.message.reference_doctype;
+            id = r.message.reference_name;
+
+        } else {
+            // Formát: CDLB:<TYPE>:<ID>
+            let type_code;
+            [, type_code, id] = parts;
+
+            doctype = frappe.boot.candelabra_type_map_reverse[type_code];
+
+            if (!doctype) {
+                frappe.msgprint(__("Neznámy typ: {0}", [type_code]));
+                return;
+            }
+        }
+
+        const exists = await frappe.db.exists(doctype, id);
+
+        if (exists) {
+            frappe.set_route("Form", doctype, id);
+        } else {
+            frappe.msgprint(
+                __("Dokument {0} {1} neexistuje", [doctype, id])
+            );
+        }
     }
 };
