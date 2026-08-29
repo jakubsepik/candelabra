@@ -49,6 +49,16 @@ def generate_custom_qr(text: str, doctype: str | None = None):
     frappe.cache().set_value(cache_key, result, expires_in_sec=3600) # type: ignore
     return result
 
+@frappe.whitelist()
+def export_qr_codes(doctype, names):
+    names = frappe.parse_json(names)
+
+    code_type = TYPE_MAP.get(doctype)
+    if not code_type:
+        frappe.throw(f"QR typ nie je nastavený pre {doctype}")
+
+    lines = [f"CDLB:{code_type}:{name}" for name in names]
+    return "\n".join(lines)
 
 @frappe.whitelist()
 def export_qr_pdf(doctype, names):
