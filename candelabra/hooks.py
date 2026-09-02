@@ -82,8 +82,8 @@ doctype_list_js = {
 
 jinja = {
     "methods": [
-        "candelabra.api.qr.generate_custom_qr",
-        "candelabra.api.qr.generate_payment_qr",
+        "candelabra.api.qr_generator.generate_custom_qr",
+        "candelabra.api.qr_generator.generate_payment_qr",
     ]
 }
 # add methods and filters to jinja environment
