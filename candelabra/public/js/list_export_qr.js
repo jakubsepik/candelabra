@@ -26,7 +26,7 @@ function add_qr_export(listview) {
 }
 
 function show_qr_dialog(doctype, link_names) {
-    const csv_text = link_names.map((n) => `CDLB:${n}`).join('\n');
+    const csv_text = link_names.join('\n');
 
     const dialog = new frappe.ui.Dialog({
         title: __('QR kódy'),
