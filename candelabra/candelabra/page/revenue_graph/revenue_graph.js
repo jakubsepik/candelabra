@@ -2,18 +2,34 @@
 //
 // Frappe Desk Page: vizualizacia rastoveho stromu ako toku penazi, zdola nahor.
 //
-//   KORENE (dole)  = zakazky, ktore zarobili peniaze
-//   KMEN  (stred)  = jeden uzol "Celkovy zisk", spaja vsetky zakazky
-//   KORUNA (hore)  = rozdelenie zisku - konkretni ludia alebo oblasti (material, admin, IT, ...)
+//   KORENE (dole)  = zdroje zisku (zakazky / projekty / timesheety - podla scope)
+//   KMEN  (stred)  = jeden uzol "Celkovy zisk" pre dany scope
+//   KORUNA (hore)  = rozdelenie zisku pre dany scope
 //
-// TATO VERZIA POUZIVA MOCK DATA. Neries logiku ziskavania GL Entries este.
-// Bez klikacej interakcie - cisto vizualny strom.
+// ROUTING:
+//   /app/revenue-graph                       -> Company scope (root, vsetko)
+//   /app/revenue-graph/project/<name>        -> Project scope
+//   /app/revenue-graph/employee/<name>       -> Employee scope
+//
+// Route je jediny zdroj pravdy pre aktualny scope. Ziadny dropdown - navigacia
+// je vylucne cez klik na uzol (root alebo crown), ktory ma priradeny "link".
+// Vlavo hore je sipka spat, viditelna len ked route ma viac ako 1 segment.
+//
+// Data sa nacitavaju cez candelabra.api.revenue.get_revenue_graph_data
+// (backend rozhoduje o obsahu aj o permissions podla scope_type/scope_name).
+//
+// FORMAT NODE-u (root aj crown):
+//   {
+//     label: "string",
+//     amount: number,
+//     type: "employee|material|admin|it|invoicing|referral"  // len crown
+//     link: { scope_type: "project"|"employee", scope_name: "DOC-NAME" }  // volitelne
+//   }
+//   Ak node ma "link", je klikatelny a klik zavola frappe.set_route('revenue-graph', scope_type, scope_name).
+//   Ak "link" chyba, node je staticky (napr. material/admin/it kategorie nemaju kam drillnut).
 //
 // STYLING: vyhradne Frappe CSS premenne (light/dark kompatibilne). Tenke borders
 // (0.5px), bez farebnych vyplni - kategoria vetvy je len maly bodkovy indikator.
-//
-// LAYOUT: korene aj koruna sa balia (wrap) do viac riadkov, ak by presiahli sirku
-// platna, aby nic nepretekalo mimo. Ziadne textove popisky riadkov (KORENE/KMEN/KORUNA).
 
 
 frappe.pages['revenue-graph'].on_page_load = function (wrapper) {
@@ -23,7 +39,13 @@ frappe.pages['revenue-graph'].on_page_load = function (wrapper) {
         single_column: true,
     });
 
-    new RastovyStrom(page);
+    wrapper.rastovy_strom = new RastovyStrom(page);
+};
+
+frappe.pages['revenue-graph'].on_page_show = function (wrapper) {
+    if (wrapper.rastovy_strom) {
+        wrapper.rastovy_strom.route_changed();
+    }
 };
 
 class RastovyStrom {
@@ -39,42 +61,23 @@ class RastovyStrom {
             referral: 'var(--pink-500, #e0568c)',
         };
 
-        this.load_mock_data();
-        this.render_layout();
-        this.draw();
+        this.roots = [];
+        this.trunk = { label: '', amount: 0 };
+        this.crown = [];
+
+        this.render_skeleton();
     }
 
     // ------------------------------------------------------------------
-    // MOCK DATA - nahradit neskor frappe.call na GL Entry / Sales Invoice
+    // SKELETON - vytvori sa raz. Sipka spat + svg + legenda.
     // ------------------------------------------------------------------
-    load_mock_data() {
-        this.roots = [
-            { label: 'Web pre Firmu A', amount: 5000 },
-            { label: 'Eshop pre Firmu B', amount: 8000 },
-            { label: 'Konzultacie Firma C', amount: 3000 },
-        ];
-
-        this.total_amount = this.roots.reduce((s, r) => s + r.amount, 0);
-        this.trunk = { label: 'Celkovy zisk', amount: this.total_amount };
-
-        this.crown = [
-            { type: 'employee', label: 'Sepik', amount: 3500 },
-            { type: 'employee', label: 'Jana', amount: 1900 },
-            { type: 'employee', label: 'Tomas', amount: 2900 },
-            { type: 'material', label: 'Material', amount: 1300 },
-            { type: 'admin', label: 'Administrativa', amount: 1700 },
-            { type: 'it', label: 'IT / Vyvoj', amount: 2500 },
-            { type: 'invoicing', label: 'Fakturacia', amount: 1100 },
-            { type: 'referral', label: 'Referent', amount: 1100 },
-        ];
-
-        // TODO: nahradit realnym suctom z GL Entries (root = Sales Invoice zisk,
-        // crown = distribucne Journal Entry riadky podla Account / Employee dimension)
-    }
-
-    render_layout() {
+    render_skeleton() {
         this.$body = $(`
 			<div class="rastovy-strom-wrapper">
+				<div class="rastovy-strom-back" style="display:none;cursor:pointer;
+					font-size:20px;color:var(--text-muted);margin-bottom:8px;width:28px;">
+					&#8592;
+				</div>
 				<svg id="rastovy-strom-svg" width="100%"></svg>
 				<div class="legend" style="display:flex;gap:16px;font-size:12px;
 					color:var(--text-muted);margin-top:8px;flex-wrap:wrap;">
@@ -89,14 +92,73 @@ class RastovyStrom {
 		`).appendTo(this.page.main);
 
         if (!$('#rastovy-strom-dot-style').length) {
-            $('<style id="rastovy-strom-dot-style">.strom-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;}</style>').appendTo('head');
+            $('<style id="rastovy-strom-dot-style">' +
+                '.strom-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;}' +
+                '.rastovy-strom-back:hover{color:var(--text-color);}' +
+                '.strom-node-clickable{cursor:pointer;}' +
+                '.strom-node-clickable:hover rect{stroke-width:1.2px;}' +
+                '</style>').appendTo('head');
         }
+
+        this.$back = this.$body.find('.rastovy-strom-back');
+        this.$back.on('click', () => {
+            frappe.set_route('revenue-graph');
+        });
+
+        this.route_changed();
+    }
+
+    // ------------------------------------------------------------------
+    // ROUTE - jediny zdroj pravdy. arr[0] = 'revenue-graph', arr[1] = scope_type,
+    // arr[2] = scope_name. Bez arr[1] => Company scope.
+    // ------------------------------------------------------------------
+    route_changed() {
+        const route = frappe.get_route();
+        const scope_type = route[1] || 'company';
+        const scope_name = route[2] || null;
+
+        this.$back.toggle(route.length > 1);
+
+        if (scope_type !== 'company' && !scope_name) {
+            frappe.set_route('revenue-graph');
+            return;
+        }
+
+        this.load_and_draw(scope_type, scope_name);
+    }
+
+    // ------------------------------------------------------------------
+    // DATA LOADING
+    // ------------------------------------------------------------------
+    load_and_draw(scope_type, scope_name) {
+        frappe.call({
+            method: 'candelabra.api.revenue.get_revenue_graph_data',
+            args: { scope_type, scope_name },
+            freeze: true,
+            callback: (r) => {
+                if (!r.message) return;
+
+                this.roots = r.message.roots || [];
+                this.trunk = r.message.trunk || { label: 'Celkovy zisk', amount: 0 };
+                this.crown = r.message.crown || [];
+
+                if (!this.roots.length && !this.crown.length) {
+                    this.show_empty_state();
+                    frappe.show_alert({ message: __('Ziadne data pre dany vyber'), indicator: 'orange' });
+                    return;
+                }
+
+                this.draw();
+            },
+        });
+    }
+
+    show_empty_state() {
+        this.$body.find('#rastovy-strom-svg').empty();
     }
 
     // ------------------------------------------------------------------
     // LAYOUT - zabali polozky do viac riadkov, ak by presiahli sirku platna.
-    // Vrati pole riadkov, kazdy riadok je pole uzlov s x/w/cx (bez y - to sa
-    // prideluje neskor podla poctu riadkov v danej sekcii).
     // ------------------------------------------------------------------
     pack_rows(items, canvas_width, safe_width, gap) {
         const max_amt = Math.max(...items.map((i) => i.amount));
@@ -136,10 +198,20 @@ class RastovyStrom {
         return `M${x0},${y0} C${x0},${my} ${x1},${my} ${x1},${y1}`;
     }
 
+    navigate_to(node) {
+        if (!node.link) return;
+        frappe.set_route('revenue-graph', node.link.scope_type, node.link.scope_name);
+    }
+
     // ------------------------------------------------------------------
     // D3 RENDER - zdola nahor: korene -> kmen -> koruna, viac riadkov ak treba
     // ------------------------------------------------------------------
     draw() {
+        if (!this.roots.length) {
+            this.show_empty_state();
+            return;
+        }
+
         const W = 820;
         const safe_width = W - 80;
         const node_h = 46;
@@ -149,18 +221,16 @@ class RastovyStrom {
         const fmt = (n) => new Intl.NumberFormat('sk-SK').format(Math.round(n));
 
         const root_rows = this.pack_rows(this.roots, W, safe_width, row_gap);
-        const crown_rows = this.pack_rows(this.crown, W, safe_width, row_gap);
+        const crown_rows = this.crown.length ? this.pack_rows(this.crown, W, safe_width, row_gap) : [];
 
         const trunk_w = 190;
         const trunk_h = node_h * 1.3;
 
-        // vyska sekcii podla poctu riadkov
-        const crown_h = crown_rows.length * node_h + (crown_rows.length - 1) * line_gap;
+        const crown_h = crown_rows.length ? crown_rows.length * node_h + (crown_rows.length - 1) * line_gap : 0;
         const root_h = root_rows.length * node_h + (root_rows.length - 1) * line_gap;
 
-        // crown je hore, jeho posledny (najspodnejsi) riadok je najblizsie ku kmenu
         const crown_top = 30;
-        const trunk_y = crown_top + crown_h + section_margin;
+        const trunk_y = crown_top + crown_h + (crown_rows.length ? section_margin : 0);
         const root_top = trunk_y + trunk_h + section_margin;
         const total_h = root_top + root_h + 30;
 
@@ -170,15 +240,16 @@ class RastovyStrom {
 
         const trunk_node = { label: this.trunk.label, amount: this.trunk.amount, x: (W - trunk_w) / 2, cx: W / 2 };
 
-        // prideli absolutne y kazdemu riadku
         const with_row_y = (rows, top) =>
             rows.flatMap((row, i) => row.map((n) => ({ ...n, y: top + i * (node_h + line_gap) })));
 
         const root_nodes = with_row_y(root_rows, root_top);
-        const crown_nodes = with_row_y(crown_rows, crown_top);
+        const crown_nodes = crown_rows.length ? with_row_y(crown_rows, crown_top) : [];
 
         const link_amt_root = d3.scaleLinear().domain([0, d3.max(this.roots, (r) => r.amount)]).range([1.5, 8]);
-        const link_amt_crown = d3.scaleLinear().domain([0, d3.max(this.crown, (c) => c.amount)]).range([1.5, 8]);
+        const link_amt_crown = crown_nodes.length
+            ? d3.scaleLinear().domain([0, d3.max(this.crown, (c) => c.amount)]).range([1.5, 8])
+            : null;
 
         const g = svg.append('g');
 
@@ -192,20 +263,24 @@ class RastovyStrom {
             .attr('stroke-width', (d) => link_amt_root(d.amount))
             .attr('d', (d) => this.link_path(d.cx, d.y, trunk_node.cx, trunk_y + trunk_h));
 
-        g.selectAll('path.crown-link')
-            .data(crown_nodes)
-            .enter()
-            .append('path')
-            .attr('fill', 'none')
-            .attr('stroke', (d) => this.dot_color[d.type])
-            .attr('stroke-opacity', 0.4)
-            .attr('stroke-width', (d) => link_amt_crown(d.amount))
-            .attr('d', (d) => this.link_path(trunk_node.cx, trunk_y, d.cx, d.y + node_h));
+        if (crown_nodes.length) {
+            g.selectAll('path.crown-link')
+                .data(crown_nodes)
+                .enter()
+                .append('path')
+                .attr('fill', 'none')
+                .attr('stroke', (d) => this.dot_color[d.type] || 'var(--border-color)')
+                .attr('stroke-opacity', 0.4)
+                .attr('stroke-width', (d) => link_amt_crown(d.amount))
+                .attr('d', (d) => this.link_path(trunk_node.cx, trunk_y, d.cx, d.y + node_h));
+        }
 
         const draw_node = (sel, dot_fn) => {
-            sel.attr('transform', (d) => `translate(${d.x},${d.y})`);
+            sel
+                .attr('transform', (d) => `translate(${d.x},${d.y})`)
+                .classed('strom-node-clickable', (d) => !!d.link)
+                .on('click', (event, d) => this.navigate_to(d));
 
-            // rozmazany podklad - jemna farebna ziara za uzlom
             sel
                 .append('rect')
                 .attr('width', (d) => d.w)
@@ -215,7 +290,6 @@ class RastovyStrom {
                 .attr('fill-opacity', 0.08)
                 .attr('filter', 'url(#soft-blur)');
 
-            // ostry vrchny obdlznik - tenky border, takmer priehladna jednotna farba
             sel
                 .append('rect')
                 .attr('width', (d) => d.w)
@@ -272,7 +346,7 @@ class RastovyStrom {
             .attr('fill', 'var(--text-color)')
             .style('font-size', '14px')
             .style('font-weight', 600)
-            .text('Celkovy zisk');
+            .text(trunk_node.label || 'Celkovy zisk');
         trunk_sel
             .append('text')
             .attr('x', trunk_w / 2)
@@ -283,6 +357,11 @@ class RastovyStrom {
             .style('font-size', '13px')
             .text(`${fmt(trunk_node.amount)} EUR`);
 
-        draw_node(g.selectAll('g.crown').data(crown_nodes).enter().append('g'), (d) => this.dot_color[d.type]);
+        if (crown_nodes.length) {
+            draw_node(
+                g.selectAll('g.crown').data(crown_nodes).enter().append('g'),
+                (d) => this.dot_color[d.type] || 'var(--border-color)'
+            );
+        }
     }
 }
