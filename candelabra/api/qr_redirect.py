@@ -1,6 +1,6 @@
+from candelabra.constants import TYPE_MAP
 import frappe
 from urllib.parse import quote
-
 
 @frappe.whitelist(allow_guest=True)
 def redirect(id: str | None = None):
@@ -21,7 +21,9 @@ def redirect(id: str | None = None):
     reference_name = qr_link.get("reference_name")
 
     if not reference_doctype or not reference_name:
-        frappe.throw("QR odkaz nemá platný cieľ")
+        frappe.local.response.type = "redirect"
+        frappe.local.response.location = f"/app/qr-code-link/{quote(id, safe='')}"
+        return
 
     target_url = (
         f"/app/{frappe.scrub(reference_doctype)}"
