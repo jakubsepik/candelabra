@@ -1,12 +1,16 @@
 # candelabra/candelabra/api/revenue.py
 #
 # Backend pre revenue-graph page. Kazda funkcia vracia {"roots": [...], "trunk": {...}, "crown": [...]}
-# vo formate, ktory ocakava revenue_graph.js (label, amount, volitelne type a link).
+# vo formate, ktory ocakava revenue_graph.js (label, amount, type, volitelne link).
+#
+# KAZDY node (root aj crown) ma teraz povinne pole "type", podla ktoreho frontend
+# vyfarbuje bodku a link v legende. Existujuce typy (pouzite v crown, distribucne
+# ciele): employee, material, admin, it, invoicing, referral.
+# Nove typy (pouzite v roots, zdroje prijmu): project, invoice.
+# Ak pridas dalsi typ, treba ho doplnit aj do dot_color / legendy vo frontende.
 #
 # Company scope pouziva Project.gross_margin (total_billed_amount - total_costing_amount),
 # co je pole, ktore ERPNext sam prepocitava pri ulozeni Project dokumentu (update_costing).
-# Ak gross_margin nie je nikdy prepocitany (0 pre vsetky), treba spustit
-# bench execute frappe.client.bulk_update alebo project.update_costing() rucne / cez scheduled job.
 
 import frappe
 from frappe import _
@@ -48,7 +52,7 @@ def check_scope_permission(scope_type, scope_name):
 # ----------------------------------------------------------------------
 def get_company_scope():
     company = frappe.defaults.get_user_default("company") or frappe.defaults.get_global_default("company")
-    print(f"get_company_scope: company={company}")
+
     projects = frappe.get_all(
         "Project",
         filters={
@@ -57,16 +61,18 @@ def get_company_scope():
         },
         fields=["name", "project_name", "gross_margin", "total_billed_amount", "total_costing_amount"],
     )
-    print(f"get_company_scope: found {len(projects)} projects for company {company}")
+
     roots = []
     for p in projects:
-
         amount = p.gross_margin
+        if not amount and p.total_billed_amount:
+            amount = (p.total_billed_amount or 0) - (p.total_costing_amount or 0)
 
         if not amount or amount <= 0:
             continue
 
         roots.append({
+            "type": "project",
             "label": p.project_name or p.name,
             "amount": amount,
             "link": {"scope_type": "project", "scope_name": p.name},
@@ -84,7 +90,7 @@ def get_company_scope():
 
 
 # ----------------------------------------------------------------------
-# PROJECT SCOPE - roots = faktury projektu, trunk = zisk projektu (gross_margin)
+# PROJECT SCOPE - roots = faktury projektu, crown = zamestnanci a ich naklad
 # ----------------------------------------------------------------------
 def get_project_scope(project):
     if not project:
@@ -105,7 +111,7 @@ def get_project_scope(project):
     )
 
     roots = [
-        {"label": inv.name, "amount": inv.grand_total}
+        {"type": "invoice", "label": inv.name, "amount": inv.grand_total}
         for inv in invoices
         if inv.grand_total
     ]
@@ -116,42 +122,88 @@ def get_project_scope(project):
 
     trunk = {"label": proj.project_name or project, "amount": amount or 0}
 
-    # TODO: crown - rozdelenie zisku projektu (zamestnanci podla Timesheet hours + naklady)
-    crown = []
+    crown = get_project_employee_earnings(project)
 
     return {"roots": roots, "trunk": trunk, "crown": crown}
 
 
+# Zamestnanci a ich naklad na danej zakazke. Project je pole na Timesheet Detail
+# (riadok), nie na hlavicke Timesheet. costing_amount = hours * Costing Rate.
+def get_project_employee_earnings(project):
+    rows = frappe.db.sql(
+        """
+        SELECT
+            ts.employee AS employee,
+            ts.employee_name AS employee_name,
+            SUM(td.costing_amount) AS amount
+        FROM `tabTimesheet Detail` td
+        JOIN `tabTimesheet` ts ON ts.name = td.parent
+        WHERE td.project = %s AND ts.docstatus = 1
+        GROUP BY ts.employee
+        """,
+        (project,),
+        as_dict=True,
+    )
+
+    crown = []
+    for r in rows:
+        if not r.amount or r.amount <= 0:
+            continue
+        crown.append({
+            "type": "employee",
+            "label": r.employee_name or r.employee,
+            "amount": r.amount,
+            "link": {"scope_type": "employee", "scope_name": r.employee},
+        })
+
+    return crown
+
+
 # ----------------------------------------------------------------------
-# EMPLOYEE SCOPE - zatial TODO, staticky prazdny vysledok
+# EMPLOYEE SCOPE - roots = projekty na ktorych pracoval a kolko na nich stal
+# firmu, trunk = celkovy naklad na zamestnanca za vsetky projekty dokopy.
 # ----------------------------------------------------------------------
 def get_employee_scope(employee):
     if not employee:
         frappe.throw(_("scope_name (employee) required"))
 
-    # TODO: roots = projekty z Timesheet, kde employee zapisal hodiny
-    # TODO: trunk = sucet vyplateneho podielu employee (Journal Entry)
-    return {"roots": [], "trunk": {"label": employee, "amount": 0}, "crown": []}
+    emp = frappe.db.get_value("Employee", employee, ["employee_name"], as_dict=True)
+    if not emp:
+        frappe.throw(_("Employee not found"))
 
-# Schéma dát pre graf príjmov:
-# roots = hlavné uzly (napr. projekty / zákazky) s hodnotou príjmu
-# trunk = celkový súhrn pre aktuálny rozsah (label + celková suma)
-# crown = rozdelenie príjmu na kategórie (zamestnanci, materiál, admin, IT, fakturácia, referral)
-REVENUE_GRAPH_SCHEMA = {
-    "roots": [
-        {
-            "label": "string, max 18 znakov zobrazenych (dlhsie sa orezu)",
-            "amount": "number, EUR, > 0",
-        }
-    ],
-    # Jeden hlavný súhrnný uzol pre aktuálny scope (napr. spoločnosť / projekt / zamestnanec)
-    "trunk": {"label": "string", "amount": "number, EUR"},
-    "crown": [
-        {
-            # Typ rozdelenia príjmu do jednotlivých kategórií
-            "type": "employee | material | admin | it | invoicing | referral",
-            "label": "string, max 18 znakov zobrazenych",
-            "amount": "number, EUR, > 0",
-        }
-    ],
-}
+    rows = frappe.db.sql(
+        """
+        SELECT
+            td.project AS project,
+            p.project_name AS project_name,
+            SUM(td.costing_amount) AS amount
+        FROM `tabTimesheet Detail` td
+        JOIN `tabTimesheet` ts ON ts.name = td.parent
+        LEFT JOIN `tabProject` p ON p.name = td.project
+        WHERE ts.employee = %s AND ts.docstatus = 1 AND td.project IS NOT NULL AND td.project != ''
+        GROUP BY td.project
+        """,
+        (employee,),
+        as_dict=True,
+    )
+
+    roots = []
+    for r in rows:
+        if not r.amount or r.amount <= 0:
+            continue
+        roots.append({
+            "type": "project",
+            "label": r.project_name or r.project,
+            "amount": r.amount,
+            "link": {"scope_type": "project", "scope_name": r.project},
+        })
+
+    trunk = {
+        "label": emp.employee_name or employee,
+        "amount": sum(r["amount"] for r in roots),
+    }
+
+    # TODO: crown - rozpad podla Activity Type alebo obdobia, ak to bude treba
+    crown = []
+
+    return {"roots": roots, "trunk": trunk, "crown": crown}

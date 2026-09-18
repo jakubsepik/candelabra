@@ -22,9 +22,11 @@
 //   {
 //     label: "string",
 //     amount: number,
-//     type: "employee|material|admin|it|invoicing|referral"  // len crown
+//     type: "employee|material|admin|it|invoicing|referral|project|invoice"
 //     link: { scope_type: "project"|"employee", scope_name: "DOC-NAME" }  // volitelne
 //   }
+//   "type" urcuje farbu bodky (dot_color) aj v legende. root uzly zvycajne
+//   pouzivaju project/invoice, crown uzly employee/material/admin/it/invoicing/referral.
 //   Ak node ma "link", je klikatelny a klik zavola frappe.set_route('revenue-graph', scope_type, scope_name).
 //   Ak "link" chyba, node je staticky (napr. material/admin/it kategorie nemaju kam drillnut).
 //
@@ -59,6 +61,8 @@ class RastovyStrom {
             it: 'var(--blue-500, #2490ef)',
             invoicing: 'var(--purple-500, #705ee0)',
             referral: 'var(--pink-500, #e0568c)',
+            project: 'var(--yellow-500, #fdb022)',
+            invoice: 'var(--cyan-500, #17a2b8)',
         };
 
         this.roots = [];
@@ -87,6 +91,8 @@ class RastovyStrom {
 					<span><span class="strom-dot" style="background:${this.dot_color.it};"></span> IT / vyvoj</span>
 					<span><span class="strom-dot" style="background:${this.dot_color.invoicing};"></span> fakturacia</span>
 					<span><span class="strom-dot" style="background:${this.dot_color.referral};"></span> referent</span>
+					<span><span class="strom-dot" style="background:${this.dot_color.project};"></span> projekt</span>
+					<span><span class="strom-dot" style="background:${this.dot_color.invoice};"></span> faktura</span>
 				</div>
 			</div>
 		`).appendTo(this.page.main);
@@ -96,7 +102,7 @@ class RastovyStrom {
                 '.strom-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;}' +
                 '.rastovy-strom-back:hover{color:var(--text-color);}' +
                 '.strom-node-clickable{cursor:pointer;}' +
-                '.strom-node-clickable:hover rect{stroke-width:1.2px;}' +
+                '.strom-node-clickable:hover{opacity:0.8;}' +
                 '</style>').appendTo('head');
         }
 
@@ -138,6 +144,7 @@ class RastovyStrom {
             callback: (r) => {
                 if (!r.message) return;
 
+                this.current_scope_type = scope_type;
                 this.roots = r.message.roots || [];
                 this.trunk = r.message.trunk || { label: 'Celkovy zisk', amount: 0 };
                 this.crown = r.message.crown || [];
@@ -326,17 +333,26 @@ class RastovyStrom {
                 .text((d) => `${fmt(d.amount)} EUR`);
         }
 
-        draw_node(g.selectAll('g.root').data(root_nodes).enter().append('g'), null);
+        draw_node(
+            g.selectAll('g.root').data(root_nodes).enter().append('g'),
+            (d) => this.dot_color[d.type] || 'var(--border-color)'
+        );
+
+        const is_root = this.current_scope_type === 'company';
 
         const trunk_sel = g.append('g').datum(trunk_node).attr('transform', `translate(${trunk_node.x},${trunk_y})`);
+        trunk_sel.classed('strom-node-clickable', !is_root);
+        if (!is_root) {
+            trunk_sel.on('click', () => frappe.set_route('revenue-graph'));
+        }
         trunk_sel
             .append('rect')
             .attr('width', trunk_w)
             .attr('height', trunk_h)
             .attr('rx', 6)
             .attr('fill', 'var(--fg-color, var(--card-bg))')
-            .attr('stroke', 'var(--border-color)')
-            .attr('stroke-width', 0.5);
+            .attr('stroke', 'var(--dark-border-color, var(--gray-400, #b6b6b6))')
+            .attr('stroke-width', 1.5);
         trunk_sel
             .append('text')
             .attr('x', trunk_w / 2)
