@@ -2,21 +2,17 @@
 //
 // Frappe Desk Page: vizualizacia rastoveho stromu ako toku penazi, zdola nahor.
 //
-//   KORENE (dole)  = zdroje zisku (zakazky / projekty / timesheety - podla scope)
+//   KORENE (dole)  = zdroje zisku (projekty s realnym ziskom / faktury - podla scope)
 //   KMEN  (stred)  = jeden uzol "Celkovy zisk" pre dany scope
-//   KORUNA (hore)  = rozdelenie zisku pre dany scope
+//   KORUNA (hore)  = zamestnanci, referenti (zobrazuje sa aj ked nie su ziadne korene)
 //
 // ROUTING:
-//   /app/revenue-graph                       -> Company scope (root, vsetko)
+//   /app/revenue-graph                       -> Company scope
 //   /app/revenue-graph/project/<name>        -> Project scope
 //   /app/revenue-graph/employee/<name>       -> Employee scope
 //
-// Route je jediny zdroj pravdy pre aktualny scope. Ziadny dropdown - navigacia
-// je vylucne cez klik na uzol (root alebo crown), ktory ma priradeny "link".
-// Vlavo hore je sipka spat, viditelna len ked route ma viac ako 1 segment.
-//
-// Data sa nacitavaju cez candelabra.api.revenue.get_revenue_graph_data
-// (backend rozhoduje o obsahu aj o permissions podla scope_type/scope_name).
+// Route je jediny zdroj pravdy pre aktualny scope. Navigacia je cez klik na uzol
+// s "link". Vlavo hore je sipka spat, viditelna len ked route ma viac ako 1 segment.
 //
 // FORMAT NODE-u (root aj crown):
 //   {
@@ -25,14 +21,6 @@
 //     type: "employee|material|admin|it|invoicing|referral|project|invoice"
 //     link: { scope_type: "project"|"employee", scope_name: "DOC-NAME" }  // volitelne
 //   }
-//   "type" urcuje farbu bodky (dot_color) aj v legende. root uzly zvycajne
-//   pouzivaju project/invoice, crown uzly employee/material/admin/it/invoicing/referral.
-//   Ak node ma "link", je klikatelny a klik zavola frappe.set_route('revenue-graph', scope_type, scope_name).
-//   Ak "link" chyba, node je staticky (napr. material/admin/it kategorie nemaju kam drillnut).
-//
-// STYLING: vyhradne Frappe CSS premenne (light/dark kompatibilne). Tenke borders
-// (0.5px), bez farebnych vyplni - kategoria vetvy je len maly bodkovy indikator.
-
 
 frappe.pages['revenue-graph'].on_page_load = function (wrapper) {
     const page = frappe.ui.make_app_page({
@@ -168,10 +156,10 @@ class RastovyStrom {
     // LAYOUT - zabali polozky do viac riadkov, ak by presiahli sirku platna.
     // ------------------------------------------------------------------
     pack_rows(items, canvas_width, safe_width, gap) {
-        const max_amt = Math.max(...items.map((i) => i.amount));
+        const max_amt = Math.max(1, ...items.map((i) => i.amount || 0));
         const w_scale = d3.scaleSqrt().domain([0, max_amt]).range([70, 170]);
 
-        const sized = items.map((item) => ({ ...item, w: w_scale(item.amount) }));
+        const sized = items.map((item) => ({ ...item, w: w_scale(item.amount || 0) }));
 
         const rows = [];
         let current = [];
@@ -211,10 +199,11 @@ class RastovyStrom {
     }
 
     // ------------------------------------------------------------------
-    // D3 RENDER - zdola nahor: korene -> kmen -> koruna, viac riadkov ak treba
+    // D3 RENDER - zdola nahor: korene -> kmen -> koruna.
+    // Korene aj koruna su volitelne, kmen sa kresli vzdy.
     // ------------------------------------------------------------------
     draw() {
-        if (!this.roots.length) {
+        if (!this.roots.length && !this.crown.length) {
             this.show_empty_state();
             return;
         }
@@ -225,20 +214,20 @@ class RastovyStrom {
         const row_gap = 20;
         const line_gap = 14;
         const section_margin = 40;
-        const fmt = (n) => new Intl.NumberFormat('sk-SK').format(Math.round(n));
+        const fmt = (n) => new Intl.NumberFormat('sk-SK').format(Math.round(n || 0));
 
-        const root_rows = this.pack_rows(this.roots, W, safe_width, row_gap);
+        const root_rows = this.roots.length ? this.pack_rows(this.roots, W, safe_width, row_gap) : [];
         const crown_rows = this.crown.length ? this.pack_rows(this.crown, W, safe_width, row_gap) : [];
 
         const trunk_w = 190;
         const trunk_h = node_h * 1.3;
 
         const crown_h = crown_rows.length ? crown_rows.length * node_h + (crown_rows.length - 1) * line_gap : 0;
-        const root_h = root_rows.length * node_h + (root_rows.length - 1) * line_gap;
+        const root_h = root_rows.length ? root_rows.length * node_h + (root_rows.length - 1) * line_gap : 0;
 
         const crown_top = 30;
         const trunk_y = crown_top + crown_h + (crown_rows.length ? section_margin : 0);
-        const root_top = trunk_y + trunk_h + section_margin;
+        const root_top = trunk_y + trunk_h + (root_rows.length ? section_margin : 0);
         const total_h = root_top + root_h + 30;
 
         const svg = d3.select(this.$body.find('#rastovy-strom-svg')[0]);
@@ -253,22 +242,26 @@ class RastovyStrom {
         const root_nodes = with_row_y(root_rows, root_top);
         const crown_nodes = crown_rows.length ? with_row_y(crown_rows, crown_top) : [];
 
-        const link_amt_root = d3.scaleLinear().domain([0, d3.max(this.roots, (r) => r.amount)]).range([1.5, 8]);
-        const link_amt_crown = crown_nodes.length
-            ? d3.scaleLinear().domain([0, d3.max(this.crown, (c) => c.amount)]).range([1.5, 8])
-            : null;
+        const link_amt_root = d3.scaleLinear()
+            .domain([0, Math.max(1, d3.max(this.roots, (r) => r.amount) || 1)])
+            .range([1.5, 8]);
+        const link_amt_crown = d3.scaleLinear()
+            .domain([0, Math.max(1, d3.max(this.crown, (c) => c.amount) || 1)])
+            .range([1.5, 8]);
 
         const g = svg.append('g');
 
-        g.selectAll('path.root-link')
-            .data(root_nodes)
-            .enter()
-            .append('path')
-            .attr('fill', 'none')
-            .attr('stroke', 'var(--border-color)')
-            .attr('stroke-opacity', 0.8)
-            .attr('stroke-width', (d) => link_amt_root(d.amount))
-            .attr('d', (d) => this.link_path(d.cx, d.y, trunk_node.cx, trunk_y + trunk_h));
+        if (root_nodes.length) {
+            g.selectAll('path.root-link')
+                .data(root_nodes)
+                .enter()
+                .append('path')
+                .attr('fill', 'none')
+                .attr('stroke', 'var(--border-color)')
+                .attr('stroke-opacity', 0.8)
+                .attr('stroke-width', (d) => link_amt_root(d.amount || 0))
+                .attr('d', (d) => this.link_path(d.cx, d.y, trunk_node.cx, trunk_y + trunk_h));
+        }
 
         if (crown_nodes.length) {
             g.selectAll('path.crown-link')
@@ -278,7 +271,7 @@ class RastovyStrom {
                 .attr('fill', 'none')
                 .attr('stroke', (d) => this.dot_color[d.type] || 'var(--border-color)')
                 .attr('stroke-opacity', 0.4)
-                .attr('stroke-width', (d) => link_amt_crown(d.amount))
+                .attr('stroke-width', (d) => link_amt_crown(d.amount || 0))
                 .attr('d', (d) => this.link_path(trunk_node.cx, trunk_y, d.cx, d.y + node_h));
         }
 
@@ -287,15 +280,6 @@ class RastovyStrom {
                 .attr('transform', (d) => `translate(${d.x},${d.y})`)
                 .classed('strom-node-clickable', (d) => !!d.link)
                 .on('click', (event, d) => this.navigate_to(d));
-
-            sel
-                .append('rect')
-                .attr('width', (d) => d.w)
-                .attr('height', node_h)
-                .attr('rx', 6)
-                .attr('fill', 'var(--text-color)')
-                .attr('fill-opacity', 0.08)
-                .attr('filter', 'url(#soft-blur)');
 
             sel
                 .append('rect')
@@ -331,12 +315,14 @@ class RastovyStrom {
                 .attr('fill', 'var(--text-muted)')
                 .style('font-size', '12px')
                 .text((d) => `${fmt(d.amount)} EUR`);
-        }
+        };
 
-        draw_node(
-            g.selectAll('g.root').data(root_nodes).enter().append('g'),
-            (d) => this.dot_color[d.type] || 'var(--border-color)'
-        );
+        if (root_nodes.length) {
+            draw_node(
+                g.selectAll('g.root').data(root_nodes).enter().append('g'),
+                (d) => this.dot_color[d.type] || 'var(--border-color)'
+            );
+        }
 
         const is_root = this.current_scope_type === 'company';
 
