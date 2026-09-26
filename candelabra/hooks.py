@@ -27,7 +27,8 @@ add_to_apps_screen = [
 # include js, css files in header of desk.html
 # app_include_css = "/assets/candelabra/css/candelabra.css"
 # app_include_js = "/assets/candelabra/js/candelabra.js"
-app_include_js = ["/assets/candelabra/js/d3.min.js"]
+app_include_js = ["/assets/candelabra/js/d3.min.js",
+                  "/assets/candelabra/js/force_home.js"]
 
 # include js, css files in header of web template
 # web_include_css = "/assets/candelabra/css/candelabra.css"
