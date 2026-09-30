@@ -1,58 +1,114 @@
 # candelabra/candelabra/api/revenue.py
 #
-# Backend pre revenue-graph page. Kazda funkcia vracia {"roots": [...], "trunk": {...}, "crown": [...]}
-# vo formate, ktory ocakava revenue_graph.js (label, amount, type, volitelne link).
+# Backend pre revenue-graph page.
 #
-# KAZDY node (root aj crown) ma pole "type". Existujuce typy: employee, material,
-# admin, it, invoicing, referral, project, invoice.
+# Endpoint vracia JEDEN JSON objekt s tromi poliami:
 #
-# Zisk projektu sa pocita priamo z dokladov (Sales Invoice minus Timesheet costing),
-# nie z poli Projectu, ktore sa v produkcii nemusia prepocitat.
+#   {
+#       "trunk": {"label": ..., "amount": ...},
+#       "root":  [ node, node, ... ],   # vetva rastuca dolu
+#       "crown": [ node, node, ... ],   # vetva rastuca hore
+#   }
 #
-# Roots (projekty) sa zobrazuju len ak maju zisk vacsi ako 0.
-# Crown (zamestnanci, referenti) sa zobrazuje VZDY, aj ked nie je ziadny projekt
-# a aj s amount=0.
+# "root" a "crown" existuju LEN na tejto top-level urovni. Kazdy node, hocijako
+# hlboko v strome, ma jednoduchy tvar:
 #
-# REFERRAL - Customer.custom_referral_code (Link na doctype Referral Code).
-# Referral Code ma partner_type (Customer/Employee) a partner (Dynamic Link).
-# Ak pole neexistuje, referral funkcie vratia prazdny zoznam.
+#   {
+#       "type": str,           # "project" | "employee" | "invoice" | "referral" | ...
+#       "name": str | None,    # nazov dokumentu (Project/Employee/...)
+#       "label": str,
+#       "amount": number,
+#       "link": {...} | None,
+#       "nodes": [ ... ],      # dalsie deti, rekurzivne, rovnakeho tvaru
+#   }
+#
+# ROZSIRITELNOST: kazdy typ node-u ma svoj "resolver" - funkciu, ktora pre
+# dany node vrati zoznam jeho deti (flat list). Novy typ node-u = napisat
+# resolver + zaregistrovat ho cez @register_resolver. Nic ine sa nemusi menit.
+#
+# PERMISSIONS: docasne odstranene. get_revenue_tree vzdy vracia firemny
+# (company-wide) pohlad, bez ohladu na prihlaseneho usera. build_employee_top
+# ostava v kode nepouzita, pripravena na neskorsie znovunapojenie.
+#
+# CYKLY A HLBKA: employee <-> project je obojsmerny vztah, rozvijanim stromu
+# do neobmedzenej hlbky by vznikol nekonecny strom. Riesenie:
+#   1. max_depth - tvrdy strop na pocet urovni (parameter API volania)
+#   2. cyklova ochrana - ak sa (type, name) uz nachadza v aktualnej vetve
+#      od korena, node sa dalej nerozvija
+#   3. cache resolvera - vysledok resolvera pre dany (type, name) sa pocita
+#      z DB len raz za request
 
 import frappe
+from frappe import utils, defaults
 from frappe import _
 
-SCOPE_TYPES = ("company", "project", "employee")
+# ----------------------------------------------------------------------
+# REGISTER: typ node-u -> resolver funkcia (node) -> list[child_node_dict]
+# ----------------------------------------------------------------------
+NODE_RESOLVERS = {}
+
+DEFAULT_MAX_DEPTH = 3
 
 
+def register_resolver(node_type):
+    def wrapper(fn):
+        NODE_RESOLVERS[node_type] = fn
+        return fn
+    return wrapper
+
+
+def make_node(node_type, label, amount, name=None, link=None):
+    return {
+        "type": node_type,
+        "name": name,
+        "label": label,
+        "amount": amount or 0,
+        "link": link,
+    }
+
+
+# ----------------------------------------------------------------------
+# ENTRY POINT
+# ----------------------------------------------------------------------
 @frappe.whitelist()
-def get_revenue_graph_data(scope_type="company", scope_name=None):
-    scope_type = (scope_type or "company").lower()
-    if scope_type not in SCOPE_TYPES:
-        frappe.throw(_("Invalid scope_type"))
+def get_revenue_tree(max_depth=None):
+    max_depth = utils.cint(max_depth) or DEFAULT_MAX_DEPTH
+    root_children, crown_children = build_company_root()
 
-    check_scope_permission(scope_type, scope_name)
+    cache = {}
+    root = [expand_node(dict(c), max_depth, depth=1, path=set(), cache=cache) for c in root_children]
+    crown = [expand_node(dict(c), max_depth, depth=1, path=set(), cache=cache) for c in crown_children]
+    trunk = make_node("trunk", "Candelabra",0)
 
-    if scope_type == "company":
-        return get_company_scope()
-    if scope_type == "project":
-        return get_project_scope(scope_name)
-    if scope_type == "employee":
-        return get_employee_scope(scope_name)
+    return {"trunk": trunk, "root": root, "crown": crown}
 
 
-def check_scope_permission(scope_type, scope_name):
-    roles = frappe.get_roles()
-    if "System Manager" in roles or "Accounts Manager" in roles:
-        return
+def expand_node(node, max_depth, depth, path, cache):
+    node["nodes"] = []
 
-    if scope_type == "employee":
-        user_employee = frappe.db.get_value("Employee", {"user_id": frappe.session.user}, "name")
-        if not user_employee or user_employee != scope_name:
-            frappe.throw(_("Not permitted"), frappe.PermissionError)
-        return
+    node_key = (node["type"], node.get("name"))
+    if depth >= max_depth or node_key in path:
+        return node
 
-    frappe.throw(_("Not permitted"), frappe.PermissionError)
+    resolver = NODE_RESOLVERS.get(node["type"])
+    if not resolver:
+        return node
+
+    if node_key not in cache:
+        cache[node_key] = resolver(node)
+    children = cache[node_key]
+
+    next_path = path | {node_key}
+    node["nodes"] = [
+        expand_node(dict(child), max_depth, depth + 1, next_path, cache)
+        for child in children
+    ]
+    return node
 
 
+# ----------------------------------------------------------------------
+# SHARED HELPERS
+# ----------------------------------------------------------------------
 def get_all_active_employees():
     return frappe.get_all(
         "Employee",
@@ -66,8 +122,6 @@ def referral_fields_exist():
     return frappe.db.has_column("Customer", "custom_referral_code")
 
 
-# Zisk kazdeho projektu = suma submitnutych faktur - suma costing_amount z submitnutych
-# timesheetov. Vracia dict {project_name: zisk}.
 def get_project_profit_map():
     billed = frappe.db.sql(
         """
@@ -93,74 +147,77 @@ def get_project_profit_map():
     return {p: b.get(p, 0) - c.get(p, 0) for p in set(b) | set(c)}
 
 
-# ----------------------------------------------------------------------
-# COMPANY SCOPE - roots = projekty s realnym ziskom, crown = vsetci aktivni
-# zamestnanci (naklad zo vsetkych timesheetov, aj 0) + referenti zakaznici
-# ----------------------------------------------------------------------
-def get_company_scope():
-    company = frappe.defaults.get_user_default("company") or frappe.defaults.get_global_default("company")
-
-    filters = {"status": ["!=", "Cancelled"]}
-    if company:
-        filters["company"] = company
-
-    projects = frappe.get_all("Project", filters=filters, fields=["name", "project_name"])
-    profit_map = get_project_profit_map()
-
-    roots = []
-    for p in projects:
-        amount = profit_map.get(p.name, 0)
-        if amount <= 0:
-            continue
-        roots.append({
-            "type": "project",
-            "label": p.project_name or p.name,
-            "amount": amount,
-            "link": {"scope_type": "project", "scope_name": p.name},
-        })
-
-    trunk = {
-        "label": "Celkovy zisk",
-        "amount": sum(r["amount"] for r in roots),
-    }
-
-    crown = get_company_employee_costing() + get_company_referrals()
-
-    return {"roots": roots, "trunk": trunk, "crown": crown}
-
-
-# Vsetci aktivni zamestnanci a ich celkovy naklad za vsetky projekty dokopy.
-# Zamestnanec bez odpracovanych hodin sa zobrazi s amount=0.
-def get_company_employee_costing():
+def get_employee_costing(project=None):
     employees = get_all_active_employees()
 
-    rows = frappe.db.sql(
-        """
-        SELECT ts.employee AS employee, SUM(td.costing_amount) AS amount
-        FROM `tabTimesheet Detail` td
-        JOIN `tabTimesheet` ts ON ts.name = td.parent
-        WHERE ts.docstatus = 1
-        GROUP BY ts.employee
-        """,
-        as_dict=True,
-    )
+    if project:
+        rows = frappe.db.sql(
+            """
+            SELECT ts.employee AS employee, SUM(td.costing_amount) AS amount
+            FROM `tabTimesheet Detail` td
+            JOIN `tabTimesheet` ts ON ts.name = td.parent
+            WHERE td.project = %s AND ts.docstatus = 1
+            GROUP BY ts.employee
+            """,
+            (project,),
+            as_dict=True,
+        )
+    else:
+        rows = frappe.db.sql(
+            """
+            SELECT ts.employee AS employee, SUM(td.costing_amount) AS amount
+            FROM `tabTimesheet Detail` td
+            JOIN `tabTimesheet` ts ON ts.name = td.parent
+            WHERE ts.docstatus = 1
+            GROUP BY ts.employee
+            """,
+            as_dict=True,
+        )
     amount_by_employee = {r.employee: (r.amount or 0) for r in rows}
 
     return [
-        {
-            "type": "employee",
-            "label": emp.employee_name or emp.name,
-            "amount": amount_by_employee.get(emp.name, 0),
-            "link": {"scope_type": "employee", "scope_name": emp.name},
-        }
+        make_node(
+            "employee",
+            emp.employee_name or emp.name,
+            amount_by_employee.get(emp.name, 0),
+            name=emp.name,
+            link={"doctype": "Employee", "name": emp.name},
+        )
         for emp in employees
     ]
 
 
-# Referenti v company scope: partneri typu Customer. Zamestnanci sa zobrazuju uz cez
-# get_company_employee_costing, aby neboli v grafe dvakrat.
-# Referent sa zobrazi aj s amount=0 (ak jeho referovani zakaznici nemaju faktury).
-# Cesta: Referral Code.partner -> Customer.custom_referral_code -> Sales Invoice
+def get_employee_project_earnings(employee):
+    rows = frappe.db.sql(
+        """
+        SELECT
+            td.project AS project,
+            p.project_name AS project_name,
+            SUM(td.costing_amount) AS amount
+        FROM `tabTimesheet Detail` td
+        JOIN `tabTimesheet` ts ON ts.name = td.parent
+        LEFT JOIN `tabProject` p ON p.name = td.project
+        WHERE ts.employee = %s AND ts.docstatus = 1 AND td.project IS NOT NULL AND td.project != ''
+        GROUP BY td.project
+        """,
+        (employee,),
+        as_dict=True,
+    )
+
+    nodes = []
+    for r in rows:
+        if not r.amount or r.amount <= 0:
+            continue
+        nodes.append(make_node(
+            "project",
+            r.project_name or r.project,
+            r.amount,
+            name=r.project,
+            link={"doctype": "Project", "name": r.project},
+        ))
+    return nodes
+
+
 def get_company_referrals():
     if not referral_fields_exist():
         return []
@@ -181,130 +238,13 @@ def get_company_referrals():
         as_dict=True,
     )
 
-    crown = []
+    nodes = []
     for r in rows:
         cust_name = frappe.db.get_value("Customer", r.ref_name, "customer_name")
-        crown.append({
-            "type": "referral",
-            "label": cust_name or r.ref_name,
-            "amount": r.amount or 0,
-            # ziadny link - customer scope v grafe zatial neexistuje
-        })
-    return crown
+        nodes.append(make_node("referral", cust_name or r.ref_name, r.amount, name=r.ref_name))
+    return nodes
 
 
-# ----------------------------------------------------------------------
-# PROJECT SCOPE - roots = faktury projektu, crown = vsetci zamestnanci a ich
-# naklad na tomto konkretnom projekte (0 ak nepracovali)
-# ----------------------------------------------------------------------
-def get_project_scope(project):
-    if not project:
-        frappe.throw(_("scope_name (project) required"))
-
-    proj = frappe.db.get_value("Project", project, ["project_name"], as_dict=True)
-    if not proj:
-        frappe.throw(_("Project not found"))
-
-    invoices = frappe.get_all(
-        "Sales Invoice",
-        filters={"project": project, "docstatus": 1},
-        fields=["name", "base_grand_total"],
-    )
-
-    roots = [
-        {"type": "invoice", "label": inv.name, "amount": inv.base_grand_total or 0}
-        for inv in invoices
-    ]
-
-    trunk = {
-        "label": proj.project_name or project,
-        "amount": get_project_profit_map().get(project, 0),
-    }
-
-    crown = get_project_employee_earnings(project)
-
-    return {"roots": roots, "trunk": trunk, "crown": crown}
-
-
-def get_project_employee_earnings(project):
-    employees = get_all_active_employees()
-
-    rows = frappe.db.sql(
-        """
-        SELECT ts.employee AS employee, SUM(td.costing_amount) AS amount
-        FROM `tabTimesheet Detail` td
-        JOIN `tabTimesheet` ts ON ts.name = td.parent
-        WHERE td.project = %s AND ts.docstatus = 1
-        GROUP BY ts.employee
-        """,
-        (project,),
-        as_dict=True,
-    )
-    amount_by_employee = {r.employee: (r.amount or 0) for r in rows}
-
-    return [
-        {
-            "type": "employee",
-            "label": emp.employee_name or emp.name,
-            "amount": amount_by_employee.get(emp.name, 0),
-            "link": {"scope_type": "employee", "scope_name": emp.name},
-        }
-        for emp in employees
-    ]
-
-
-# ----------------------------------------------------------------------
-# EMPLOYEE SCOPE - roots = projekty s nakladom zamestnanca vacsim ako 0,
-# trunk = celkovy naklad na zamestnanca, crown = zakaznici, ktorych
-# zamestnanec referoval (cez Referral Code) a ich trzba
-# ----------------------------------------------------------------------
-def get_employee_scope(employee):
-    if not employee:
-        frappe.throw(_("scope_name (employee) required"))
-
-    emp = frappe.db.get_value("Employee", employee, ["employee_name"], as_dict=True)
-    if not emp:
-        frappe.throw(_("Employee not found"))
-
-    rows = frappe.db.sql(
-        """
-        SELECT
-            td.project AS project,
-            p.project_name AS project_name,
-            SUM(td.costing_amount) AS amount
-        FROM `tabTimesheet Detail` td
-        JOIN `tabTimesheet` ts ON ts.name = td.parent
-        LEFT JOIN `tabProject` p ON p.name = td.project
-        WHERE ts.employee = %s AND ts.docstatus = 1 AND td.project IS NOT NULL AND td.project != ''
-        GROUP BY td.project
-        """,
-        (employee,),
-        as_dict=True,
-    )
-
-    roots = []
-    for r in rows:
-        if not r.amount or r.amount <= 0:
-            continue
-        roots.append({
-            "type": "project",
-            "label": r.project_name or r.project,
-            "amount": r.amount,
-            "link": {"scope_type": "project", "scope_name": r.project},
-        })
-
-    trunk = {
-        "label": emp.employee_name or employee,
-        "amount": sum(r["amount"] for r in roots),
-    }
-
-    crown = get_employee_referred_customers(employee)
-
-    return {"roots": roots, "trunk": trunk, "crown": crown}
-
-
-# Zakaznici referovani danym zamestnancom a ich celkova trzba.
-# Zakaznik bez faktury sa zobrazi s amount=0.
 def get_employee_referred_customers(employee):
     if not referral_fields_exist():
         return []
@@ -327,10 +267,64 @@ def get_employee_referred_customers(employee):
     )
 
     return [
-        {
-            "type": "referral",
-            "label": r.customer_name or r.customer,
-            "amount": r.amount or 0,
-        }
+        make_node("referral", r.customer_name or r.customer, r.amount, name=r.customer)
         for r in rows
     ]
+
+
+# ----------------------------------------------------------------------
+# TOP LEVEL - jediné miesto, kde sa deti delia na root/crown. Nie je to
+# resolver zaregistrovany v NODE_RESOLVERS, lebo "company"/"employee" scope
+# sa nikdy nevyskytuje hlbsie v strome, len tu na vrchu.
+# ----------------------------------------------------------------------
+def build_company_root():
+    profit_map = get_project_profit_map()
+
+    company = defaults.get_user_default("company") or defaults.get_global_default("company")
+    filters = {"status": ["!=", "Cancelled"]}
+    if company:
+        filters["company"] = company
+
+    projects = frappe.get_all("Project", filters=filters, fields=["name", "project_name"])
+
+    root_children = []
+    for p in projects:
+        amount = profit_map.get(p.name, 0)
+        if amount <= 0:
+            continue
+        root_children.append(make_node(
+            "project", p.project_name or p.name, amount,
+            name=p.name, link={"doctype": "Project", "name": p.name},
+        ))
+
+    crown_children = get_employee_costing() + get_company_referrals()
+
+    return root_children, crown_children
+
+
+# ----------------------------------------------------------------------
+# RESOLVERS - kazdy vracia FLAT zoznam deti daneho node-u
+# ----------------------------------------------------------------------
+@register_resolver("project")
+def resolve_project(node):
+    project = node["name"]
+
+    invoices = frappe.get_all(
+        "Sales Invoice",
+        filters={"project": project, "docstatus": 1},
+        fields=["name", "base_grand_total"],
+    )
+    invoice_nodes = [
+        make_node("invoice", inv.name, inv.base_grand_total, name=inv.name,
+                   link={"doctype": "Sales Invoice", "name": inv.name})
+        for inv in invoices
+    ]
+
+    return invoice_nodes + get_employee_costing(project=project)
+
+
+@register_resolver("employee")
+def resolve_employee(node):
+    employee = node["name"]
+    return get_employee_project_earnings(employee) + get_employee_referred_customers(employee)
+

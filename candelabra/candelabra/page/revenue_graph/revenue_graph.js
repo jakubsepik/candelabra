@@ -2,25 +2,273 @@
 //
 // Frappe Desk Page: vizualizacia rastoveho stromu ako toku penazi, zdola nahor.
 //
-//   KORENE (dole)  = zdroje zisku (projekty s realnym ziskom / faktury - podla scope)
-//   KMEN  (stred)  = jeden uzol "Celkovy zisk" pre dany scope
-//   KORUNA (hore)  = zamestnanci, referenti (zobrazuje sa aj ked nie su ziadne korene)
+// KORENE (dole) = zdroje zisku, rekurzivne
+// KMEN (stred) = jeden uzol "Celkovy zisk" pre celu firmu
+// KORUNA (hore) = zamestnanci a referenti, rekurzivne
 //
-// ROUTING:
-//   /app/revenue-graph                       -> Company scope
-//   /app/revenue-graph/project/<name>        -> Project scope
-//   /app/revenue-graph/employee/<name>       -> Employee scope
-//
-// Route je jediny zdroj pravdy pre aktualny scope. Navigacia je cez klik na uzol
-// s "link". Vlavo hore je sipka spat, viditelna len ked route ma viac ako 1 segment.
-//
-// FORMAT NODE-u (root aj crown):
-//   {
+// FORMAT NODE-u:
+// {
 //     label: "string",
 //     amount: number,
-//     type: "employee|material|admin|it|invoicing|referral|project|invoice"
-//     link: { scope_type: "project"|"employee", scope_name: "DOC-NAME" }  // volitelne
-//   }
+//     type: "employee|material|admin|it|invoicing|referral|project|invoice",
+//     link: {
+//         doctype: "Project"|"Employee"|"Sales Invoice"|...,
+//         name: "DOC-NAME"
+//     } | null,
+//     nodes: [Node, ...]
+// }
+
+const REVENUE_GRAPH_UI = {
+    node_html_template: ({ label, amount, type, link, nodes }) => `
+        <div class="strom-node-card strom-type-${type}">
+            <span class="strom-dot"></span>
+            <div class="strom-node-title">${label}</div>
+            <div class="strom-node-amount">${amount} EUR</div>
+        </div>
+    `,
+
+    node_css: `
+        .rastovy-strom-wrapper {
+            position: relative;
+            width: 100%;
+            height: 500px;
+            overflow: hidden;
+        }
+
+        #rastovy-strom-svg {
+            display: block;
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+
+            overflow: hidden;
+            cursor: grab;
+
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: var(--fg-color, var(--card-bg));
+
+            user-select: none;
+            touch-action: none;
+        }
+
+        #rastovy-strom-svg:active {
+            cursor: grabbing;
+        }
+
+        .strom-node-foreign-object {
+            overflow: visible;
+        }
+
+        .strom-node-card {
+            box-sizing: border-box;
+            width: 100%;
+            height: 100%;
+
+            display: grid;
+            grid-template-rows: 16px 14px;
+            align-content: center;
+            align-items: center;
+            row-gap: 2px;
+
+            padding: 6px 10px;
+
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+
+            background: var(--fg-color, var(--card-bg));
+            color: var(--text-color);
+            font-family: inherit;
+        }
+
+        .strom-node-title {
+            width: 100%;
+            max-width: 100%;
+            height: 16px;
+            line-height: 16px;
+
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            text-align: center;
+
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .strom-node-amount {
+            width: 100%;
+            height: 14px;
+            line-height: 14px;
+
+            overflow: hidden;
+            white-space: nowrap;
+            text-align: center;
+
+            color: var(--text-muted);
+            font-size: 12px;
+        }
+
+        .strom-node-clickable {
+            cursor: pointer;
+        }
+
+        .strom-node-clickable.strom-node-card:hover {
+            opacity: 0.8;
+        }
+
+        .strom-trunk-node.strom-node-card {
+            border-color: var(--dark-border-color, var(--gray-400, #b6b6b6));
+            border-width: 2px;
+        }
+
+        .strom-trunk-node.strom-node-title {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .strom-trunk-node.strom-node-amount {
+            font-size: 13px;
+        }
+`,
+
+    link: {
+        width: 3,
+        opacity: 0.65,
+        odd_floor_color: 'var(--blue-500, #2490ef)',
+        even_floor_color: 'var(--orange-500, #d4880d)',
+    },
+};
+
+
+// Samostatna konfiguracia legendy.
+// Zobrazuju sa iba typy pouzite v datach.
+const REVENUE_GRAPH_LEGEND = {
+    items: {
+        employee: {
+            label: 'zamestnanci',
+            class_name: 'strom-type-employee',
+        },
+
+        material: {
+            label: 'material',
+            class_name: 'strom-type-material',
+        },
+
+        admin: {
+            label: 'administrativa',
+            class_name: 'strom-type-admin',
+        },
+
+        it: {
+            label: 'IT / vyvoj',
+            class_name: 'strom-type-it',
+        },
+
+        invoicing: {
+            label: 'fakturacia',
+            class_name: 'strom-type-invoicing',
+        },
+
+        referral: {
+            label: 'referent',
+            class_name: 'strom-type-referral',
+        },
+
+        project: {
+            label: 'projekt',
+            class_name: 'strom-type-project',
+        },
+
+        invoice: {
+            label: 'faktura',
+            class_name: 'strom-type-invoice',
+        },
+    },
+
+    css: `
+        .strom-legend {
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 2;
+
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+
+            margin: 0;
+            padding: 6px 12px;
+            border-bottom-left-radius: 6px;
+            border-bottom-right-radius: 6px;
+
+            background: rgba(0, 0, 0, 0.35);
+            background: color-mix(in srgb, var(--fg-color, var(--card-bg)) 55%, transparent);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            border-top: 1px solid var(--border-color);
+
+            color: var(--text-muted);
+            font-size: 12px;
+
+            pointer-events: none;
+        }
+
+        .strom-legend-item {
+            pointer-events: auto;
+        }
+
+        .strom-legend-item {
+            display: inline-flex;
+            align-items: center;
+        }
+
+        .strom-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            margin-right: 4px;
+            flex: 0 0 8px;
+            border-radius: 50%;
+            background-color: var(--strom-type-color, var(--border-color));
+        }
+
+        .strom-type-employee {
+            --strom-type-color: var(--green-500, #29a745);
+        }
+
+        .strom-type-material {
+            --strom-type-color: var(--orange-500, #d4880d);
+        }
+
+        .strom-type-admin {
+            --strom-type-color: var(--gray-500, #8d8d8d);
+        }
+
+        .strom-type-it {
+            --strom-type-color: var(--blue-500, #2490ef);
+        }
+
+        .strom-type-invoicing {
+            --strom-type-color: var(--purple-500, #705ee0);
+        }
+
+        .strom-type-referral {
+            --strom-type-color: var(--pink-500, #e0568c);
+        }
+
+        .strom-type-project {
+            --strom-type-color: var(--yellow-500, #fdb022);
+        }
+
+        .strom-type-invoice {
+            --strom-type-color: var(--cyan-500, #17a2b8);
+        }
+`,
+};
+
 
 frappe.pages['revenue-graph'].on_page_load = function (wrapper) {
     const page = frappe.ui.make_app_page({
@@ -32,114 +280,162 @@ frappe.pages['revenue-graph'].on_page_load = function (wrapper) {
     wrapper.rastovy_strom = new RastovyStrom(page);
 };
 
+
 frappe.pages['revenue-graph'].on_page_show = function (wrapper) {
     if (wrapper.rastovy_strom) {
-        wrapper.rastovy_strom.route_changed();
+        wrapper.rastovy_strom.load_and_draw();
     }
 };
+
 
 class RastovyStrom {
     constructor(page) {
         this.page = page;
 
-        this.dot_color = {
-            employee: 'var(--green-500, #29a745)',
-            material: 'var(--orange-500, #d4880d)',
-            admin: 'var(--gray-500, #8d8d8d)',
-            it: 'var(--blue-500, #2490ef)',
-            invoicing: 'var(--purple-500, #705ee0)',
-            referral: 'var(--pink-500, #e0568c)',
-            project: 'var(--yellow-500, #fdb022)',
-            invoice: 'var(--cyan-500, #17a2b8)',
+        this.roots = [];
+
+        this.trunk = {
+            label: '',
+            amount: 0,
         };
 
-        this.roots = [];
-        this.trunk = { label: '', amount: 0 };
         this.crown = [];
 
         this.render_skeleton();
     }
 
-    // ------------------------------------------------------------------
-    // SKELETON - vytvori sa raz. Sipka spat + svg + legenda.
-    // ------------------------------------------------------------------
+
+    // Vytvori zakladne HTML iba raz.
     render_skeleton() {
         this.$body = $(`
-			<div class="rastovy-strom-wrapper">
-				<div class="rastovy-strom-back" style="display:none;cursor:pointer;
-					font-size:20px;color:var(--text-muted);margin-bottom:8px;width:28px;">
-					&#8592;
-				</div>
-				<svg id="rastovy-strom-svg" width="100%"></svg>
-				<div class="legend" style="display:flex;gap:16px;font-size:12px;
-					color:var(--text-muted);margin-top:8px;flex-wrap:wrap;">
-					<span><span class="strom-dot" style="background:${this.dot_color.employee};"></span> zamestnanci</span>
-					<span><span class="strom-dot" style="background:${this.dot_color.material};"></span> material</span>
-					<span><span class="strom-dot" style="background:${this.dot_color.admin};"></span> administrativa</span>
-					<span><span class="strom-dot" style="background:${this.dot_color.it};"></span> IT / vyvoj</span>
-					<span><span class="strom-dot" style="background:${this.dot_color.invoicing};"></span> fakturacia</span>
-					<span><span class="strom-dot" style="background:${this.dot_color.referral};"></span> referent</span>
-					<span><span class="strom-dot" style="background:${this.dot_color.project};"></span> projekt</span>
-					<span><span class="strom-dot" style="background:${this.dot_color.invoice};"></span> faktura</span>
-				</div>
-			</div>
-		`).appendTo(this.page.main);
+            <div class="rastovy-strom-wrapper">
+                <svg id="rastovy-strom-svg"></svg>
 
-        if (!$('#rastovy-strom-dot-style').length) {
-            $('<style id="rastovy-strom-dot-style">' +
-                '.strom-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;}' +
-                '.rastovy-strom-back:hover{color:var(--text-color);}' +
-                '.strom-node-clickable{cursor:pointer;}' +
-                '.strom-node-clickable:hover{opacity:0.8;}' +
-                '</style>').appendTo('head');
+                <div class="strom-legend"></div>
+            </div>
+        `).appendTo(this.page.main);
+
+        if (!$('#rastovy-strom-node-style').length) {
+            $('<style id="rastovy-strom-node-style"></style>')
+                .text(
+                    REVENUE_GRAPH_UI.node_css +
+                    REVENUE_GRAPH_LEGEND.css
+                )
+                .appendTo('head');
         }
 
-        this.$back = this.$body.find('.rastovy-strom-back');
-        this.$back.on('click', () => {
-            frappe.set_route('revenue-graph');
+        this.load_and_draw();
+    }
+
+
+    collect_used_types(
+        items,
+        used_types = new Set()
+    ) {
+        (items || []).forEach((node) => {
+            if (
+                node.type &&
+                REVENUE_GRAPH_LEGEND.items[node.type]
+            ) {
+                used_types.add(node.type);
+            }
+
+            this.collect_used_types(
+                node.nodes,
+                used_types
+            );
         });
 
-        this.route_changed();
+        return used_types;
     }
 
-    // ------------------------------------------------------------------
-    // ROUTE - jediny zdroj pravdy. arr[0] = 'revenue-graph', arr[1] = scope_type,
-    // arr[2] = scope_name. Bez arr[1] => Company scope.
-    // ------------------------------------------------------------------
-    route_changed() {
-        const route = frappe.get_route();
-        const scope_type = route[1] || 'company';
-        const scope_name = route[2] || null;
 
-        this.$back.toggle(route.length > 1);
+    render_legend() {
+        const used_types =
+            this.collect_used_types([
+                ...this.roots,
+                ...this.crown,
+            ]);
 
-        if (scope_type !== 'company' && !scope_name) {
-            frappe.set_route('revenue-graph');
-            return;
-        }
+        const $legend = this.$body
+            .find('.strom-legend')
+            .empty();
 
-        this.load_and_draw(scope_type, scope_name);
+        Object.entries(
+            REVENUE_GRAPH_LEGEND.items
+        ).forEach(([type, item]) => {
+            if (!used_types.has(type)) {
+                return;
+            }
+
+            $('<span>')
+                .addClass(
+                    `strom-legend-item ${item.class_name}`
+                )
+                .append(
+                    $('<span>')
+                        .addClass('strom-dot')
+                        .attr(
+                            'aria-hidden',
+                            'true'
+                        )
+                )
+                .append(
+                    $('<span>').text(
+                        item.label
+                    )
+                )
+                .appendTo($legend);
+        });
+
+        $legend.toggle(
+            used_types.size > 0
+        );
     }
 
-    // ------------------------------------------------------------------
-    // DATA LOADING
-    // ------------------------------------------------------------------
-    load_and_draw(scope_type, scope_name) {
+
+    load_and_draw() {
         frappe.call({
-            method: 'candelabra.api.revenue.get_revenue_graph_data',
-            args: { scope_type, scope_name },
+            method:
+                'candelabra.api.revenue.get_revenue_tree',
+
             freeze: true,
-            callback: (r) => {
-                if (!r.message) return;
 
-                this.current_scope_type = scope_type;
-                this.roots = r.message.roots || [];
-                this.trunk = r.message.trunk || { label: 'Celkovy zisk', amount: 0 };
-                this.crown = r.message.crown || [];
+            callback: (response) => {
+                if (!response.message) {
+                    return;
+                }
 
-                if (!this.roots.length && !this.crown.length) {
+                this.roots =
+                    response.message.root ||
+                    response.message.roots ||
+                    [];
+
+                this.trunk =
+                    response.message.trunk || {
+                        label: 'Celkovy zisk',
+                        amount: 0,
+                    };
+
+                this.crown =
+                    response.message.crown ||
+                    [];
+
+                this.render_legend();
+
+                if (
+                    !this.roots.length &&
+                    !this.crown.length
+                ) {
                     this.show_empty_state();
-                    frappe.show_alert({ message: __('Ziadne data pre dany vyber'), indicator: 'orange' });
+
+                    frappe.show_alert({
+                        message: __(
+                            'Ziadne data pre dany vyber'
+                        ),
+                        indicator: 'orange',
+                    });
+
                     return;
                 }
 
@@ -148,222 +444,948 @@ class RastovyStrom {
         });
     }
 
+
     show_empty_state() {
-        this.$body.find('#rastovy-strom-svg').empty();
+        this.$body
+            .find('#rastovy-strom-svg')
+            .empty();
     }
 
-    // ------------------------------------------------------------------
-    // LAYOUT - zabali polozky do viac riadkov, ak by presiahli sirku platna.
-    // ------------------------------------------------------------------
-    pack_rows(items, canvas_width, safe_width, gap) {
-        const max_amt = Math.max(1, ...items.map((i) => i.amount || 0));
-        const w_scale = d3.scaleSqrt().domain([0, max_amt]).range([70, 170]);
 
-        const sized = items.map((item) => ({ ...item, w: w_scale(item.amount || 0) }));
+    // Amount moze byt cislo alebo objekt
+    // vo formate { source, parsedValue }.
+    norm_amount(value) {
+        if (
+            value &&
+            typeof value === 'object'
+        ) {
+            return value.parsedValue || 0;
+        }
+
+        return value || 0;
+    }
+
+
+    // Rozbali rekurzivny strom na pole urovni.
+    flatten_levels(items, side) {
+        const levels = [];
+
+        let current = items.map(
+            (node) => ({
+                ...node,
+
+                amount: this.norm_amount(
+                    node.amount
+                ),
+
+                parent: null,
+                depth: 0,
+                side,
+            })
+        );
+
+        while (current.length) {
+            levels.push(current);
+
+            const next = [];
+
+            current.forEach((wrapper) => {
+                (
+                    wrapper.nodes || []
+                ).forEach((child) => {
+                    next.push({
+                        ...child,
+
+                        amount:
+                            this.norm_amount(
+                                child.amount
+                            ),
+
+                        parent: wrapper,
+
+                        depth:
+                            wrapper.depth + 1,
+
+                        side,
+                    });
+                });
+            });
+
+            current = next;
+        }
+
+        return levels;
+    }
+
+
+    // Vypocita potrebnu sirku jedneho poschodia.
+    measure_level_width(items, gap) {
+        if (!items.length) {
+            return 0;
+        }
+
+        const max_amount = Math.max(
+            1,
+            ...items.map(
+                (item) =>
+                    item.amount || 0
+            )
+        );
+
+        const width_scale = d3
+            .scaleSqrt()
+            .domain([0, max_amount])
+            .range([70, 170]);
+
+        return (
+            items.reduce(
+                (sum, item) =>
+                    sum +
+                    width_scale(
+                        item.amount || 0
+                    ),
+                0
+            ) +
+            gap *
+            Math.max(
+                0,
+                items.length - 1
+            )
+        );
+    }
+
+
+    // Rozlozi nody v ramci poschodia.
+    pack_rows(
+        items,
+        canvas_width,
+        safe_width,
+        gap
+    ) {
+        const max_amount = Math.max(
+            1,
+            ...items.map(
+                (item) =>
+                    item.amount || 0
+            )
+        );
+
+        const width_scale = d3
+            .scaleSqrt()
+            .domain([0, max_amount])
+            .range([70, 170]);
+
+        items.forEach((item) => {
+            item.w = width_scale(
+                item.amount || 0
+            );
+        });
 
         const rows = [];
-        let current = [];
-        let current_w = 0;
-        sized.forEach((item) => {
-            const add_w = current.length ? gap + item.w : item.w;
-            if (current_w + add_w > safe_width && current.length > 0) {
-                rows.push(current);
-                current = [];
-                current_w = 0;
-            }
-            current.push(item);
-            current_w += current.length > 1 ? gap + item.w : item.w;
-        });
-        if (current.length) rows.push(current);
 
-        const margin_x = (canvas_width - safe_width) / 2;
-        return rows.map((row) => {
-            const total_w = row.reduce((s, n) => s + n.w, 0) + gap * (row.length - 1);
-            let x = margin_x + (safe_width - total_w) / 2;
-            return row.map((n) => {
-                const node = { ...n, x, cx: x + n.w / 2 };
-                x += n.w + gap;
-                return node;
+        let current = [];
+        let current_width = 0;
+
+        items.forEach((item) => {
+            const added_width =
+                current.length
+                    ? gap + item.w
+                    : item.w;
+
+            if (
+                current_width +
+                added_width >
+                safe_width &&
+                current.length > 0
+            ) {
+                rows.push(current);
+
+                current = [];
+                current_width = 0;
+            }
+
+            current.push(item);
+
+            current_width +=
+                current.length > 1
+                    ? gap + item.w
+                    : item.w;
+        });
+
+        if (current.length) {
+            rows.push(current);
+        }
+
+        const margin_x =
+            (
+                canvas_width -
+                safe_width
+            ) / 2;
+
+        rows.forEach((row) => {
+            const total_width =
+                row.reduce(
+                    (sum, node) =>
+                        sum + node.w,
+                    0
+                ) +
+                gap *
+                (row.length - 1);
+
+            let x =
+                margin_x +
+                (
+                    safe_width -
+                    total_width
+                ) / 2;
+
+            row.forEach((node) => {
+                node.x = x;
+                node.cx =
+                    x + node.w / 2;
+
+                x += node.w + gap;
+            });
+        });
+
+        return rows;
+    }
+
+
+    assign_row_y(
+        rows,
+        top,
+        node_height,
+        line_gap
+    ) {
+        rows.forEach((row, index) => {
+            const y =
+                top +
+                index *
+                (
+                    node_height +
+                    line_gap
+                );
+
+            row.forEach((node) => {
+                node.y = y;
             });
         });
     }
 
+
     link_path(x0, y0, x1, y1) {
-        const my = (y0 + y1) / 2;
-        return `M${x0},${y0} C${x0},${my} ${x1},${my} ${x1},${y1}`;
+        const middle_y =
+            (y0 + y1) / 2;
+
+        return (
+            `M${x0},${y0} ` +
+            `C${x0},${middle_y} ` +
+            `${x1},${middle_y} ` +
+            `${x1},${y1} `
+        );
     }
+
+
+    escape_html(value) {
+        return $('<div>')
+            .text(String(value ?? ''))
+            .html();
+    }
+
+
+    node_html(node, format_amount) {
+        return (
+            REVENUE_GRAPH_UI
+                .node_html_template({
+                    label:
+                        this.escape_html(
+                            node.label ||
+                            ''
+                        ),
+
+                    amount:
+                        this.escape_html(
+                            format_amount(
+                                node.amount
+                            )
+                        ),
+
+                    type:
+                        this.escape_html(
+                            node.type ||
+                            ''
+                        ),
+
+                    depth: node.depth,
+                    side: node.side,
+                })
+        );
+    }
+
+
+    // Poschodie 1 je spojenie kmena s depth 0.
+    floor_link_color(node) {
+        const floor =
+            (node.depth || 0) + 1;
+
+        return floor % 2 === 0
+            ? REVENUE_GRAPH_UI
+                .link.even_floor_color
+            : REVENUE_GRAPH_UI
+                .link.odd_floor_color;
+    }
+
 
     navigate_to(node) {
-        if (!node.link) return;
-        frappe.set_route('revenue-graph', node.link.scope_type, node.link.scope_name);
+        if (
+            !node.link ||
+            !node.link.doctype ||
+            !node.link.name
+        ) {
+            return;
+        }
+
+        frappe.set_route(
+            'Form',
+            node.link.doctype,
+            node.link.name
+        );
     }
 
-    // ------------------------------------------------------------------
-    // D3 RENDER - zdola nahor: korene -> kmen -> koruna.
-    // Korene aj koruna su volitelne, kmen sa kresli vzdy.
-    // ------------------------------------------------------------------
+
     draw() {
-        if (!this.roots.length && !this.crown.length) {
+        if (
+            !this.roots.length &&
+            !this.crown.length
+        ) {
             this.show_empty_state();
             return;
         }
 
-        const W = 820;
-        const safe_width = W - 80;
-        const node_h = 46;
+        const node_height = 46;
         const row_gap = 20;
         const line_gap = 14;
         const section_margin = 40;
-        const fmt = (n) => new Intl.NumberFormat('sk-SK').format(Math.round(n || 0));
+        const level_margin = 30;
 
-        const root_rows = this.roots.length ? this.pack_rows(this.roots, W, safe_width, row_gap) : [];
-        const crown_rows = this.crown.length ? this.pack_rows(this.crown, W, safe_width, row_gap) : [];
+        const format_amount = (number) =>
+            new Intl.NumberFormat(
+                'sk-SK'
+            ).format(
+                Math.round(number || 0)
+            );
 
-        const trunk_w = 190;
-        const trunk_h = node_h * 1.3;
+        const root_levels =
+            this.roots.length
+                ? this.flatten_levels(
+                    this.roots,
+                    'root'
+                )
+                : [];
 
-        const crown_h = crown_rows.length ? crown_rows.length * node_h + (crown_rows.length - 1) * line_gap : 0;
-        const root_h = root_rows.length ? root_rows.length * node_h + (root_rows.length - 1) * line_gap : 0;
+        const crown_levels =
+            this.crown.length
+                ? this.flatten_levels(
+                    this.crown,
+                    'crown'
+                )
+                : [];
+
+        // Virtualna sirka stromu.
+        const level_widths = [
+            ...root_levels,
+            ...crown_levels,
+        ].map((items) =>
+            this.measure_level_width(
+                items,
+                row_gap
+            )
+        );
+
+        const canvas_width = Math.max(
+            820,
+            Math.ceil(
+                Math.max(
+                    0,
+                    ...level_widths
+                ) + 80
+            )
+        );
+
+        const safe_width =
+            canvas_width - 80;
+
+        const layout_level = (items) => {
+            const rows = this.pack_rows(
+                items,
+                canvas_width,
+                safe_width,
+                row_gap
+            );
+
+            const height = rows.length
+                ? rows.length *
+                node_height +
+                (
+                    rows.length - 1
+                ) *
+                line_gap
+                : 0;
+
+            return {
+                rows,
+                h: height,
+            };
+        };
+
+        const root_layouts =
+            root_levels.map(
+                layout_level
+            );
+
+        const crown_layouts =
+            crown_levels.map(
+                layout_level
+            );
+
+        const root_height_total =
+            root_layouts.reduce(
+                (
+                    sum,
+                    layout,
+                    index
+                ) =>
+                    sum +
+                    layout.h +
+                    (
+                        index
+                            ? level_margin
+                            : 0
+                    ),
+                0
+            );
+
+        const crown_height_total =
+            crown_layouts.reduce(
+                (
+                    sum,
+                    layout,
+                    index
+                ) =>
+                    sum +
+                    layout.h +
+                    (
+                        index
+                            ? level_margin
+                            : 0
+                    ),
+                0
+            );
+
+        const trunk_width = 190;
+
+        const trunk_height =
+            node_height * 1.3;
 
         const crown_top = 30;
-        const trunk_y = crown_top + crown_h + (crown_rows.length ? section_margin : 0);
-        const root_top = trunk_y + trunk_h + (root_rows.length ? section_margin : 0);
-        const total_h = root_top + root_h + 30;
 
-        const svg = d3.select(this.$body.find('#rastovy-strom-svg')[0]);
+        const trunk_y =
+            crown_top +
+            crown_height_total +
+            (
+                crown_layouts.length
+                    ? section_margin
+                    : 0
+            );
+
+        const root_top =
+            trunk_y +
+            trunk_height +
+            (
+                root_layouts.length
+                    ? section_margin
+                    : 0
+            );
+
+        const total_height =
+            root_top +
+            root_height_total +
+            30;
+
+        // Koruna: najhlbsia uroven je hore.
+        // Uroven 0 je najblizsie ku kmenu.
+        let y_cursor = crown_top;
+
+        const crown_level_y =
+            new Array(
+                crown_layouts.length
+            );
+
+        for (
+            let index =
+                crown_layouts.length - 1;
+            index >= 0;
+            index -= 1
+        ) {
+            crown_level_y[index] =
+                y_cursor;
+
+            y_cursor +=
+                crown_layouts[index].h +
+                level_margin;
+        }
+
+        // Korene: uroven 0 je priamo pod kmenom.
+        y_cursor = root_top;
+
+        const root_level_y =
+            new Array(
+                root_layouts.length
+            );
+
+        for (
+            let index = 0;
+            index <
+            root_layouts.length;
+            index += 1
+        ) {
+            root_level_y[index] =
+                y_cursor;
+
+            y_cursor +=
+                root_layouts[index].h +
+                level_margin;
+        }
+
+        root_layouts.forEach(
+            (layout, index) => {
+                this.assign_row_y(
+                    layout.rows,
+                    root_level_y[
+                    index
+                    ],
+                    node_height,
+                    line_gap
+                );
+            }
+        );
+
+        crown_layouts.forEach(
+            (layout, index) => {
+                this.assign_row_y(
+                    layout.rows,
+                    crown_level_y[
+                    index
+                    ],
+                    node_height,
+                    line_gap
+                );
+            }
+        );
+
+        const root_nodes =
+            root_layouts.flatMap(
+                (layout) =>
+                    layout.rows.flat()
+            );
+
+        const crown_nodes =
+            crown_layouts.flatMap(
+                (layout) =>
+                    layout.rows.flat()
+            );
+
+        // Pouzivame priamo DOM element.
+        // Takto sa vyhneme svg.node() === null.
+        const svg_element = this.$body
+            .find('#rastovy-strom-svg')
+            .get(0);
+
+        if (!svg_element) {
+            return;
+        }
+
+        const svg = d3.select(
+            svg_element
+        );
+
+        // Odstran predchadzajuci obsah.
         svg.selectAll('*').remove();
-        svg.attr('viewBox', `0 0 ${W} ${total_h}`);
 
-        const trunk_node = { label: this.trunk.label, amount: this.trunk.amount, x: (W - trunk_w) / 2, cx: W / 2 };
+        // Odstran predchadzajuce D3 zoom eventy.
+        svg.on('.zoom', null);
 
-        const with_row_y = (rows, top) =>
-            rows.flatMap((row, i) => row.map((n) => ({ ...n, y: top + i * (node_h + line_gap) })));
+        // SVG je iba viewport.
+        // Fyzicku velkost urcuje CSS.
+        svg.attr('viewBox', null);
 
-        const root_nodes = with_row_y(root_rows, root_top);
-        const crown_nodes = crown_rows.length ? with_row_y(crown_rows, crown_top) : [];
+        const trunk_node = {
+            label: this.trunk.label,
 
-        const link_amt_root = d3.scaleLinear()
-            .domain([0, Math.max(1, d3.max(this.roots, (r) => r.amount) || 1)])
-            .range([1.5, 8]);
-        const link_amt_crown = d3.scaleLinear()
-            .domain([0, Math.max(1, d3.max(this.crown, (c) => c.amount) || 1)])
-            .range([1.5, 8]);
+            amount: this.norm_amount(
+                this.trunk.amount
+            ),
 
-        const g = svg.append('g');
+            x:
+                (
+                    canvas_width -
+                    trunk_width
+                ) / 2,
+
+            cx: canvas_width / 2,
+            y: trunk_y,
+
+            w: trunk_width,
+            h: trunk_height,
+
+            type: 'trunk',
+            side: 'trunk',
+            depth: 0,
+        };
+
+        // Vsetok obsah grafu je v jednom G.
+        // D3 zoom transformuje tento element.
+        const graph = svg.append('g');
+
+        const zoom = d3
+            .zoom()
+            .scaleExtent([0.15, 4])
+            .on('zoom', (event) => {
+                graph.attr(
+                    'transform',
+                    event.transform
+                );
+            });
+
+        // Aktivuje:
+        // - drag = pan
+        // - wheel = zoom
+        svg.call(zoom);
+
+
+        // ---------------------------------------------------------
+        // ROOT LINKS
+        // ---------------------------------------------------------
 
         if (root_nodes.length) {
-            g.selectAll('path.root-link')
+            graph
+                .selectAll(
+                    'path.root-link'
+                )
                 .data(root_nodes)
                 .enter()
                 .append('path')
                 .attr('fill', 'none')
-                .attr('stroke', 'var(--border-color)')
-                .attr('stroke-opacity', 0.8)
-                .attr('stroke-width', (d) => link_amt_root(d.amount || 0))
-                .attr('d', (d) => this.link_path(d.cx, d.y, trunk_node.cx, trunk_y + trunk_h));
+                .attr(
+                    'stroke',
+                    (node) =>
+                        this.floor_link_color(
+                            node
+                        )
+                )
+                .attr(
+                    'stroke-opacity',
+                    REVENUE_GRAPH_UI
+                        .link.opacity
+                )
+                .attr(
+                    'stroke-width',
+                    REVENUE_GRAPH_UI
+                        .link.width
+                )
+                .attr(
+                    'd',
+                    (node) => {
+                        const parent_center_x =
+                            node.parent
+                                ? node
+                                    .parent
+                                    .cx
+                                : trunk_node
+                                    .cx;
+
+                        const parent_bottom =
+                            node.parent
+                                ? node
+                                    .parent
+                                    .y +
+                                node_height
+                                : trunk_y +
+                                trunk_height;
+
+                        return this.link_path(
+                            node.cx,
+                            node.y,
+                            parent_center_x,
+                            parent_bottom
+                        );
+                    }
+                );
         }
 
+
+        // ---------------------------------------------------------
+        // CROWN LINKS
+        // ---------------------------------------------------------
+
         if (crown_nodes.length) {
-            g.selectAll('path.crown-link')
+            graph
+                .selectAll(
+                    'path.crown-link'
+                )
                 .data(crown_nodes)
                 .enter()
                 .append('path')
                 .attr('fill', 'none')
-                .attr('stroke', (d) => this.dot_color[d.type] || 'var(--border-color)')
-                .attr('stroke-opacity', 0.4)
-                .attr('stroke-width', (d) => link_amt_crown(d.amount || 0))
-                .attr('d', (d) => this.link_path(trunk_node.cx, trunk_y, d.cx, d.y + node_h));
+                .attr(
+                    'stroke',
+                    (node) =>
+                        this.floor_link_color(
+                            node
+                        )
+                )
+                .attr(
+                    'stroke-opacity',
+                    REVENUE_GRAPH_UI
+                        .link.opacity
+                )
+                .attr(
+                    'stroke-width',
+                    REVENUE_GRAPH_UI
+                        .link.width
+                )
+                .attr(
+                    'd',
+                    (node) => {
+                        const parent_center_x =
+                            node.parent
+                                ? node
+                                    .parent
+                                    .cx
+                                : trunk_node
+                                    .cx;
+
+                        const parent_top =
+                            node.parent
+                                ? node
+                                    .parent
+                                    .y
+                                : trunk_y;
+
+                        return this.link_path(
+                            parent_center_x,
+                            parent_top,
+                            node.cx,
+                            node.y +
+                            node_height
+                        );
+                    }
+                );
         }
 
-        const draw_node = (sel, dot_fn) => {
-            sel
-                .attr('transform', (d) => `translate(${d.x},${d.y})`)
-                .classed('strom-node-clickable', (d) => !!d.link)
-                .on('click', (event, d) => this.navigate_to(d));
 
-            sel
-                .append('rect')
-                .attr('width', (d) => d.w)
-                .attr('height', node_h)
-                .attr('rx', 6)
-                .attr('fill', 'var(--text-color)')
-                .attr('fill-opacity', 0.03)
-                .attr('stroke', 'var(--border-color)')
-                .attr('stroke-width', 0.5);
+        // ---------------------------------------------------------
+        // NODE RENDERER
+        // ---------------------------------------------------------
 
-            if (dot_fn) {
-                sel.append('circle').attr('cx', 14).attr('cy', 12).attr('r', 3.5).attr('fill', dot_fn);
-            }
+        const draw_node = (selection) => {
+            selection
+                .attr(
+                    'transform',
+                    (node) =>
+                        `translate(${node.x}, ${node.y})`
+                )
+                .classed(
+                    'strom-node-clickable',
+                    (node) =>
+                        Boolean(
+                            node.link &&
+                            node.link.name
+                        )
+                )
+                .on(
+                    'click',
+                    (
+                        event,
+                        node
+                    ) =>
+                        this.navigate_to(
+                            node
+                        )
+                );
 
-            sel
-                .append('text')
-                .attr('x', (d) => d.w / 2)
-                .attr('y', node_h / 2 - 7)
-                .attr('text-anchor', 'middle')
-                .attr('dominant-baseline', 'central')
-                .attr('fill', 'var(--text-color)')
-                .style('font-size', '13px')
-                .style('font-weight', 500)
-                .text((d) => (d.label.length > 18 ? d.label.slice(0, 17) + '.' : d.label));
-
-            sel
-                .append('text')
-                .attr('x', (d) => d.w / 2)
-                .attr('y', node_h / 2 + 10)
-                .attr('text-anchor', 'middle')
-                .attr('dominant-baseline', 'central')
-                .attr('fill', 'var(--text-muted)')
-                .style('font-size', '12px')
-                .text((d) => `${fmt(d.amount)} EUR`);
+            selection
+                .append(
+                    'foreignObject'
+                )
+                .attr(
+                    'class',
+                    'strom-node-foreign-object'
+                )
+                .attr(
+                    'width',
+                    (node) => node.w
+                )
+                .attr(
+                    'height',
+                    (node) =>
+                        node.h ||
+                        node_height
+                )
+                .append('xhtml:div')
+                .style(
+                    'width',
+                    '100%'
+                )
+                .style(
+                    'height',
+                    '100%'
+                )
+                .html(
+                    (node) =>
+                        this.node_html(
+                            node,
+                            format_amount
+                        )
+                );
         };
+
+
+        // ---------------------------------------------------------
+        // ROOT NODES
+        // ---------------------------------------------------------
 
         if (root_nodes.length) {
             draw_node(
-                g.selectAll('g.root').data(root_nodes).enter().append('g'),
-                (d) => this.dot_color[d.type] || 'var(--border-color)'
+                graph
+                    .selectAll('g.root')
+                    .data(root_nodes)
+                    .enter()
+                    .append('g')
             );
         }
 
-        const is_root = this.current_scope_type === 'company';
 
-        const trunk_sel = g.append('g').datum(trunk_node).attr('transform', `translate(${trunk_node.x},${trunk_y})`);
-        trunk_sel.classed('strom-node-clickable', !is_root);
-        if (!is_root) {
-            trunk_sel.on('click', () => frappe.set_route('revenue-graph'));
-        }
-        trunk_sel
-            .append('rect')
-            .attr('width', trunk_w)
-            .attr('height', trunk_h)
-            .attr('rx', 6)
-            .attr('fill', 'var(--fg-color, var(--card-bg))')
-            .attr('stroke', 'var(--dark-border-color, var(--gray-400, #b6b6b6))')
-            .attr('stroke-width', 1.5);
-        trunk_sel
-            .append('text')
-            .attr('x', trunk_w / 2)
-            .attr('y', trunk_h / 2 - 8)
-            .attr('text-anchor', 'middle')
-            .attr('dominant-baseline', 'central')
-            .attr('fill', 'var(--text-color)')
-            .style('font-size', '14px')
-            .style('font-weight', 600)
-            .text(trunk_node.label || 'Celkovy zisk');
-        trunk_sel
-            .append('text')
-            .attr('x', trunk_w / 2)
-            .attr('y', trunk_h / 2 + 12)
-            .attr('text-anchor', 'middle')
-            .attr('dominant-baseline', 'central')
-            .attr('fill', 'var(--text-muted)')
-            .style('font-size', '13px')
-            .text(`${fmt(trunk_node.amount)} EUR`);
+        // ---------------------------------------------------------
+        // TRUNK NODE
+        // ---------------------------------------------------------
+
+        draw_node(
+            graph
+                .append('g')
+                .datum(trunk_node)
+                .classed(
+                    'strom-trunk-node',
+                    true
+                )
+        );
+
+
+        // ---------------------------------------------------------
+        // CROWN NODES
+        // ---------------------------------------------------------
 
         if (crown_nodes.length) {
             draw_node(
-                g.selectAll('g.crown').data(crown_nodes).enter().append('g'),
-                (d) => this.dot_color[d.type] || 'var(--border-color)'
+                graph
+                    .selectAll('g.crown')
+                    .data(crown_nodes)
+                    .enter()
+                    .append('g')
             );
         }
+
+
+        // ---------------------------------------------------------
+        // INITIAL FIT
+        // ---------------------------------------------------------
+        //
+        // Dolezite:
+        // nepouzivame svg.node(), ale priamo svg_element,
+        // ktory sme overili vyssie.
+
+        const viewport_width =
+            svg_element.clientWidth;
+
+        const viewport_height =
+            svg_element.clientHeight;
+
+        // Ak SVG este nema layout rozmery,
+        // initial fit preskocime.
+        // Samotny graf je ale uz vykresleny.
+        if (
+            !viewport_width ||
+            !viewport_height
+        ) {
+            return;
+        }
+
+        const padding = 40;
+
+        const available_width =
+            Math.max(
+                1,
+                viewport_width -
+                padding * 2
+            );
+
+        const available_height =
+            Math.max(
+                1,
+                viewport_height -
+                padding * 2
+            );
+
+        const fit_scale = Math.min(
+            available_width /
+            canvas_width,
+
+            available_height /
+            total_height,
+
+            // Malicky strom automaticky
+            // nezvacsi nad 100 %.
+            1
+        );
+
+        // Musi sediet s dolnym limitom
+        // scaleExtent().
+        const initial_scale =
+            Math.max(
+                0.15,
+                fit_scale
+            );
+
+        // Centrovanie virtualneho canvasu
+        // do realneho SVG viewportu.
+        const translate_x =
+            (
+                viewport_width -
+                canvas_width *
+                initial_scale
+            ) / 2;
+
+        const translate_y =
+            (
+                viewport_height -
+                total_height *
+                initial_scale
+            ) / 2;
+
+        const initial_transform =
+            d3.zoomIdentity
+                .translate(
+                    translate_x,
+                    translate_y
+                )
+                .scale(
+                    initial_scale
+                );
+
+        svg.call(
+            zoom.transform,
+            initial_transform
+        );
     }
 }
