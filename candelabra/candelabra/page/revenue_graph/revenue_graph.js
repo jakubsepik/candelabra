@@ -3,8 +3,12 @@
 // Frappe Desk Page: vizualizacia rastoveho stromu ako toku penazi, zdola nahor.
 //
 // KORENE (dole) = zdroje zisku, rekurzivne
-// KMEN (stred) = jeden uzol "Celkovy zisk" pre celu firmu
+// KMEN (stred) = jeden uzol "Celkovy zisk" pre celu firmu (alebo zamestnanca v drill-down mode)
 // KORUNA (hore) = zamestnanci a referenti, rekurzivne
+//
+// ROUTING:
+// revenue-graph           -> cely strom firmy (get_revenue_tree)
+// revenue-graph/employee/<name> -> strom jedneho zamestnanca (get_employee_revenue_tree)
 //
 // FORMAT NODE-u:
 // {
@@ -301,7 +305,19 @@ class RastovyStrom {
 
         this.crown = [];
 
+        this.employee = null;
+
         this.render_skeleton();
+
+        // Klik na zamestnanca meni iba sub-route
+        // (revenue-graph/employee/<name>), nie hlavnu stranku,
+        // takze on_page_show sa nezavola znova. Musime
+        // pocuvat zmenu route priamo.
+        frappe.router.on('change', () => {
+            if (frappe.get_route()[0] === 'revenue-graph') {
+                this.load_and_draw();
+            }
+        });
     }
 
 
@@ -394,10 +410,46 @@ class RastovyStrom {
     }
 
 
+    // Nastavi tlacidlo "Spat na cely strom" v toolbare,
+    // iba ked sme v drill-down mode pre zamestnanca.
+    render_back_button(employee) {
+        this.page.clear_inner_toolbar();
+
+        if (!employee) {
+            return;
+        }
+
+        this.page.add_inner_button(
+            __('Spat na cely strom'),
+            () => {
+                frappe.set_route('revenue-graph');
+            }
+        );
+    }
+
+
     load_and_draw() {
+        const route = frappe.get_route();
+        const employee =
+            route[1] === 'employee'
+                ? route[2]
+                : null;
+
+        this.employee = employee;
+
+        const method = employee
+            ? 'candelabra.api.revenue.get_employee_revenue_tree'
+            : 'candelabra.api.revenue.get_revenue_tree';
+
+        const args = employee
+            ? { employee }
+            : {};
+
+        this.render_back_button(employee);
+
         frappe.call({
-            method:
-                'candelabra.api.revenue.get_revenue_tree',
+            method,
+            args,
 
             freeze: true,
 
@@ -421,34 +473,18 @@ class RastovyStrom {
                     response.message.crown ||
                     [];
 
+                this.page.set_title(
+                    employee
+                        ? this.trunk.label ||
+                        __('Zamestnanec')
+                        : __('Rastovy strom')
+                );
+
                 this.render_legend();
-
-                if (
-                    !this.roots.length &&
-                    !this.crown.length
-                ) {
-                    this.show_empty_state();
-
-                    frappe.show_alert({
-                        message: __(
-                            'Ziadne data pre dany vyber'
-                        ),
-                        indicator: 'orange',
-                    });
-
-                    return;
-                }
 
                 this.draw();
             },
         });
-    }
-
-
-    show_empty_state() {
-        this.$body
-            .find('#rastovy-strom-svg')
-            .empty();
     }
 
 
@@ -746,6 +782,18 @@ class RastovyStrom {
             return;
         }
 
+        // Zamestnanca nenavigujeme na Form,
+        // ale drillneme do jeho vlastneho stromu.
+        if (node.link.doctype === 'Employee') {
+            frappe.set_route(
+                'revenue-graph',
+                'employee',
+                node.link.name
+            );
+
+            return;
+        }
+
         frappe.set_route(
             'Form',
             node.link.doctype,
@@ -755,14 +803,6 @@ class RastovyStrom {
 
 
     draw() {
-        if (
-            !this.roots.length &&
-            !this.crown.length
-        ) {
-            this.show_empty_state();
-            return;
-        }
-
         const node_height = 46;
         const row_gap = 20;
         const line_gap = 14;

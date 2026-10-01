@@ -2,7 +2,7 @@
 #
 # Backend pre revenue-graph page.
 #
-# Endpoint vracia JEDEN JSON objekt s tromi poliami:
+# Dva endpointy, obidva vracaju JEDEN JSON objekt s tromi poliami:
 #
 #   {
 #       "trunk": {"label": ..., "amount": ...},
@@ -10,8 +10,13 @@
 #       "crown": [ node, node, ... ],   # vetva rastuca hore
 #   }
 #
-# "root" a "crown" existuju LEN na tejto top-level urovni. Kazdy node, hocijako
-# hlboko v strome, ma jednoduchy tvar:
+# get_revenue_tree       - firemny (company-wide) pohlad
+# get_employee_revenue_tree - pohlad pre jedneho zamestnanca:
+#     root  = referraly smerom na neho (zakaznici + zamestnanci, ktorych
+#             Referral Code ukazuje na partner_type='Employee', partner=<on>)
+#     crown = zakazky (projekty), na ktorych pracoval
+#
+# Kazdy node, hocijako hlboko v strome, ma jednoduchy tvar:
 #
 #   {
 #       "type": str,           # "project" | "employee" | "invoice" | "referral" | ...
@@ -26,9 +31,12 @@
 # dany node vrati zoznam jeho deti (flat list). Novy typ node-u = napisat
 # resolver + zaregistrovat ho cez @register_resolver. Nic ine sa nemusi menit.
 #
-# PERMISSIONS: docasne odstranene. get_revenue_tree vzdy vracia firemny
-# (company-wide) pohlad, bez ohladu na prihlaseneho usera. build_employee_top
-# ostava v kode nepouzita, pripravena na neskorsie znovunapojenie.
+# Referovany zamestnanec dostava type "employee" (nie "referral"), lebo pre
+# "employee" uz existuje resolver - takze sa da rekurzivne rozbalit na jeho
+# vlastne zakazky aj jeho vlastne referraly.
+#
+# PERMISSIONS: docasne odstranene, oba endpointy su zatial bez kontroly,
+# kto si smie pozriet ktory pohlad.
 #
 # CYKLY A HLBKA: employee <-> project je obojsmerny vztah, rozvijanim stromu
 # do neobmedzenej hlbky by vznikol nekonecny strom. Riesenie:
@@ -67,19 +75,10 @@ def make_node(node_type, label, amount, name=None, link=None):
     }
 
 
-# ----------------------------------------------------------------------
-# ENTRY POINT
-# ----------------------------------------------------------------------
-@frappe.whitelist()
-def get_revenue_tree(max_depth=None):
-    max_depth = utils.cint(max_depth) or DEFAULT_MAX_DEPTH
-    root_children, crown_children = build_company_root()
-
+def build_tree(root_children, crown_children, trunk, max_depth):
     cache = {}
     root = [expand_node(dict(c), max_depth, depth=1, path=set(), cache=cache) for c in root_children]
     crown = [expand_node(dict(c), max_depth, depth=1, path=set(), cache=cache) for c in crown_children]
-    trunk = make_node("trunk", "Candelabra",0)
-
     return {"trunk": trunk, "root": root, "crown": crown}
 
 
@@ -107,6 +106,31 @@ def expand_node(node, max_depth, depth, path, cache):
 
 
 # ----------------------------------------------------------------------
+# ENTRY POINTS
+# ----------------------------------------------------------------------
+@frappe.whitelist()
+def get_revenue_tree(max_depth=None):
+    max_depth = utils.cint(max_depth) or DEFAULT_MAX_DEPTH
+    root_children, crown_children = build_company_root()
+    trunk = make_node("trunk", "Candelabra", 0)
+    return build_tree(root_children, crown_children, trunk, max_depth)
+
+
+@frappe.whitelist()
+def get_employee_revenue_tree(employee, max_depth=None):
+    if not employee:
+        frappe.throw(_("employee required"))
+
+    max_depth = utils.cint(max_depth) or DEFAULT_MAX_DEPTH
+    root_children, crown_children = build_employee_root(employee)
+
+    emp_name = frappe.db.get_value("Employee", employee, "employee_name")
+    trunk = make_node("trunk", emp_name or employee, sum(n["amount"] for n in crown_children))
+
+    return build_tree(root_children, crown_children, trunk, max_depth)
+
+
+# ----------------------------------------------------------------------
 # SHARED HELPERS
 # ----------------------------------------------------------------------
 def get_all_active_employees():
@@ -118,8 +142,8 @@ def get_all_active_employees():
     )
 
 
-def referral_fields_exist():
-    return frappe.db.has_column("Customer", "custom_referral_code")
+def referral_fields_exist(doctype="Customer"):
+    return frappe.db.has_column(doctype, "custom_referral_code")
 
 
 def get_project_profit_map():
@@ -187,6 +211,20 @@ def get_employee_costing(project=None):
     ]
 
 
+def get_single_employee_costing(employee):
+    row = frappe.db.sql(
+        """
+        SELECT SUM(td.costing_amount) AS amount
+        FROM `tabTimesheet Detail` td
+        JOIN `tabTimesheet` ts ON ts.name = td.parent
+        WHERE ts.employee = %s AND ts.docstatus = 1
+        """,
+        (employee,),
+        as_dict=True,
+    )
+    return (row[0].amount or 0) if row else 0
+
+
 def get_employee_project_earnings(employee):
     rows = frappe.db.sql(
         """
@@ -219,7 +257,7 @@ def get_employee_project_earnings(employee):
 
 
 def get_company_referrals():
-    if not referral_fields_exist():
+    if not referral_fields_exist("Customer"):
         return []
 
     rows = frappe.db.sql(
@@ -246,7 +284,7 @@ def get_company_referrals():
 
 
 def get_employee_referred_customers(employee):
-    if not referral_fields_exist():
+    if not referral_fields_exist("Customer"):
         return []
 
     rows = frappe.db.sql(
@@ -272,10 +310,39 @@ def get_employee_referred_customers(employee):
     ]
 
 
+# Zamestnanci, ktorych referoval dany zamestnanec (Employee.custom_referral_code
+# -> Referral Code s partner_type='Employee', partner=<employee>). Vracia typ
+# "employee", nie "referral" - ma zaregistrovany resolver, takze sa da dalej
+# rozbalit (jeho zakazky + jeho vlastne referraly).
+def get_employee_referred_employees(employee):
+    if not referral_fields_exist("Employee"):
+        return []
+
+    rows = frappe.db.sql(
+        """
+        SELECT e.name AS employee, e.employee_name AS employee_name
+        FROM `tabEmployee` e
+        JOIN `tabReferral Code` rc ON rc.name = e.custom_referral_code
+        WHERE rc.partner_type = 'Employee' AND rc.partner = %s
+        """,
+        (employee,),
+        as_dict=True,
+    )
+
+    nodes = []
+    for r in rows:
+        amount = get_single_employee_costing(r.employee)
+        nodes.append(make_node(
+            "employee", r.employee_name or r.employee, amount,
+            name=r.employee, link={"doctype": "Employee", "name": r.employee},
+        ))
+    return nodes
+
+
 # ----------------------------------------------------------------------
 # TOP LEVEL - jediné miesto, kde sa deti delia na root/crown. Nie je to
-# resolver zaregistrovany v NODE_RESOLVERS, lebo "company"/"employee" scope
-# sa nikdy nevyskytuje hlbsie v strome, len tu na vrchu.
+# resolver zaregistrovany v NODE_RESOLVERS, lebo tieto top-level scope-y sa
+# nikdy nevyskytuju hlbsie v strome, len tu na vrchu.
 # ----------------------------------------------------------------------
 def build_company_root():
     profit_map = get_project_profit_map()
@@ -299,6 +366,12 @@ def build_company_root():
 
     crown_children = get_employee_costing() + get_company_referrals()
 
+    return root_children, crown_children
+
+
+def build_employee_root(employee):
+    root_children = get_employee_referred_customers(employee) + get_employee_referred_employees(employee)
+    crown_children = get_employee_project_earnings(employee)
     return root_children, crown_children
 
 
@@ -326,5 +399,7 @@ def resolve_project(node):
 @register_resolver("employee")
 def resolve_employee(node):
     employee = node["name"]
-    return get_employee_project_earnings(employee) + get_employee_referred_customers(employee)
+    return get_employee_project_earnings(employee) + get_employee_referred_customers(employee) + get_employee_referred_employees(employee)
 
+# "invoice" a "referral" nemaju resolver -> su listy stromu. Novy typ node-u
+# (napr. rozvinut "referral" na jeho faktury) = pridat @register_resolver.
